@@ -10,9 +10,9 @@ from zengine.safety import CommandSafety
 from zengine.script import ScriptGenerator, LiveRiskCalculator
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QLabel, QPushButton, QGroupBox, QTabWidget, QScrollArea,
+    QLabel, QPushButton, QGroupBox, QGridLayout, QTabWidget, QScrollArea,
     QStackedWidget, QToolBox, QTextEdit, QMessageBox, QFileDialog,
-    QMenuBar, QMenu, QProgressBar
+    QMenuBar, QMenu, QProgressBar, QFrame, QSizePolicy
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QAction
@@ -31,7 +31,8 @@ from zengine.workers import (
 from zengine.ui.widgets import (
     FlowIndicator, CleanGraphWidget, ThreeBarChartWidget,
     StrategyComparisonWidget, ScriptDiffWidget, ScriptPreviewWidget,
-    LiveRiskWidget, CategoryWidget
+    LiveRiskWidget, CategoryWidget, NeonPanel, MetricCard, DonutGauge, THEME,
+    TaskChecklistWidget, LiveAnalysisWidget, SystemLogWidget, ResultsCardWidget
 )
 from zengine.ui.dialogs import SystemDetailsDialog, ThoughtTraceWidget
 
@@ -92,28 +93,30 @@ class MainWindow(QMainWindow):
     
     def setup_menu(self):
         menubar = self.menuBar()
-        menubar.setStyleSheet("""
-            QMenuBar {
-                background-color: #1a1a1a;
-                color: white;
-                border-bottom: 1px solid #00ff00;
-            }
-            QMenuBar::item {
+        menubar.setStyleSheet(f"""
+            QMenuBar {{
+                background-color: {THEME["bg"]};
+                color: {THEME["text"]};
+                border-bottom: 1px solid rgba(120,255,255,0.10);
+            }}
+            QMenuBar::item {{
                 background-color: transparent;
-                padding: 4px 10px;
-            }
-            QMenuBar::item:selected {
-                background-color: #2a2a2a;
-                border: 1px solid #00ff00;
-            }
-            QMenu {
-                background-color: #1a1a1a;
-                color: white;
-                border: 1px solid #00ff00;
-            }
-            QMenu::item:selected {
-                background-color: #2a2a2a;
-            }
+                padding: 6px 10px;
+                font-weight: 700;
+            }}
+            QMenuBar::item:selected {{
+                background-color: rgba(46,243,255,0.08);
+                border: 1px solid rgba(46,243,255,0.22);
+                border-radius: 8px;
+            }}
+            QMenu {{
+                background-color: {THEME["panel"]};
+                color: {THEME["text"]};
+                border: 1px solid rgba(120,255,255,0.12);
+            }}
+            QMenu::item:selected {{
+                background-color: rgba(46,243,255,0.10);
+            }}
         """)
         
         view_menu = menubar.addMenu("View")
@@ -142,122 +145,281 @@ class MainWindow(QMainWindow):
             self.trace_action.setChecked(False)
     
     def setup_ui(self):
+        self._apply_global_style()
+        # Hide the native menubar; the reference uses an in-app top bar.
+        try:
+            self.menuBar().hide()
+        except Exception:
+            pass
+
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
-        main_layout.setSpacing(5)
-        main_layout.setContentsMargins(5, 5, 5, 5)
-        
-        # Header
-        header = self._create_header()
-        main_layout.addLayout(header)
-        
-        # Flow indicator
+        root = QVBoxLayout(central)
+        root.setSpacing(6)
+        root.setContentsMargins(8, 8, 8, 8)
+
+        # Top bar (logo + step nav + status)
+        root.addLayout(self._create_header())
+        # Pipeline controls + status (not inside Optimization Tasks)
+        root.addLayout(self._create_subbar())
+
+        # Main content: left icon rail + screenshot grid
+        content = QHBoxLayout()
+        content.setSpacing(6)
+        content.setContentsMargins(0, 0, 0, 0)
+
+        rail = self._create_left_rail()
+        content.addWidget(rail)
+
+        # Use a fixed grid like the reference screenshot (not generic splitters)
+        dashboard = QWidget()
+        grid = QGridLayout(dashboard)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
+
+        # LEFT TOP: system scan — compact (smaller than before)
+        self.system_panel = NeonPanel("SYSTEM SCAN", accent=THEME["cyan"])
+        self.system_panel.setMaximumHeight(198)
+        sys_grid = QGridLayout()
+        sys_grid.setHorizontalSpacing(12)
+        sys_grid.setVerticalSpacing(4)
+
+        def _kv(r: int, c: int, k: str, v: str = "--"):
+            key = QLabel(k)
+            key.setStyleSheet(f"color: {THEME['muted']}; font-weight: 900; letter-spacing: 2px; font-size: 8px;")
+            val = QLabel(v)
+            val.setStyleSheet(f"color: {THEME['text']}; font-weight: 900; font-size: 11px;")
+            sys_grid.addWidget(key, r, c * 2)
+            sys_grid.addWidget(val, r, c * 2 + 1)
+            return val
+
+        self.sys_os = _kv(0, 0, "OS", "WIN11 PRO")
+        self.sys_host = _kv(0, 1, "HOSTNAME", "NEXUS-7")
+        self.sys_cpu = _kv(1, 0, "CPU CORES", "16C/32T")
+        self.sys_mem = _kv(1, 1, "RAM TOTAL", "32 GB")
+        self.sys_uptime = _kv(2, 0, "UPTIME", "14D 06H")
+        self.sys_score = _kv(2, 1, "PROCESSES", "247")
+
+        self.run_scan_btn = QPushButton("[ RE-SCAN ]")
+        self.run_scan_btn.clicked.connect(self._scan)
+        sys_grid.addWidget(self.run_scan_btn, 3, 0, 1, 4)
+
+        self.system_panel.body_layout.addLayout(sys_grid)
+        grid.addWidget(self.system_panel, 0, 0)
+
+        # LEFT: optimization tasks — checklist only (no pipeline UI here)
+        self.ops_panel = NeonPanel("OPTIMIZATION TASKS", accent=THEME["cyan"])
+        self.task_list = TaskChecklistWidget()
+        self.ops_panel.body_layout.addWidget(self.task_list, 1)
+        # Tasks occupy rows 1–2, left column (like screenshot)
+        grid.addWidget(self.ops_panel, 1, 0, 2, 1)
+
+        # CENTER TOP: live analysis only (pipeline charts kept hidden)
+        self.analysis_panel = NeonPanel("LIVE ANALYSIS", accent=THEME["green"])
+        self.live_analysis = LiveAnalysisWidget()
+        self.analysis_panel.body_layout.addWidget(self.live_analysis)
+        grid.addWidget(self.analysis_panel, 0, 1)
+
+        # RIGHT TOP: risk matrix — donut + labels like screenshot
+        self.risk_panel = NeonPanel("RISK MATRIX", accent=THEME["cyan"])
+        risk_outer = QVBoxLayout()
+        risk_outer.setContentsMargins(0, 0, 0, 0)
+        risk_outer.setSpacing(8)
+        risk_row = QHBoxLayout()
+        self.donut = DonutGauge("RISK", 28, accent=THEME["cyan"])
+        self.donut.setMinimumHeight(120)
+        self.donut.setMaximumHeight(140)
+        risk_row.addWidget(self.donut, 1)
+
+        rgrid = QGridLayout()
+        rgrid.setHorizontalSpacing(8)
+        rgrid.setVerticalSpacing(4)
+
+        def _rlab(row: int, k: str, val: QLabel):
+            kk = QLabel(k)
+            kk.setStyleSheet(f"color: {THEME['muted']}; font-weight: 900; letter-spacing: 1px; font-size: 8px;")
+            rgrid.addWidget(kk, row, 0)
+            rgrid.addWidget(val, row, 1)
+
+        self.r_threat = QLabel("LOW")
+        self.r_threat.setStyleSheet(f"color: {THEME['green']}; font-weight: 900; font-size: 10px;")
+        _rlab(0, "THREAT LVL", self.r_threat)
+
+        self.r_high_risk = QLabel("2")
+        self.r_high_risk.setStyleSheet(f"color: {THEME['yellow']}; font-weight: 900; font-size: 10px;")
+        _rlab(1, "HIGH RISK", self.r_high_risk)
+
+        self.r_unsafe = QLabel("1")
+        self.r_unsafe.setStyleSheet(f"color: {THEME['yellow']}; font-weight: 900; font-size: 10px;")
+        _rlab(2, "UNSAFE CMD", self.r_unsafe)
+
+        self.r_reboot = QLabel("NO")
+        self.r_reboot.setStyleSheet(f"color: {THEME['magenta']}; font-weight: 900; font-size: 10px;")
+        _rlab(3, "REBOOT REQ", self.r_reboot)
+
+        self.r_conf = QLabel("94%")
+        self.r_conf.setStyleSheet(f"color: {THEME['magenta']}; font-weight: 900; font-size: 10px;")
+        _rlab(4, "CONFIDENCE", self.r_conf)
+
+        risk_row.addLayout(rgrid, 1)
+        risk_outer.addLayout(risk_row)
+
+        scores_row = QHBoxLayout()
+        self.r_score_now = QLabel("72")
+        self.r_proj = QLabel("91")
+        sn = QLabel("SCORE NOW:")
+        sn.setStyleSheet(f"color: {THEME['muted']}; font-weight: 900; font-size: 8px;")
+        pj = QLabel("PROJECTED:")
+        pj.setStyleSheet(f"color: {THEME['muted']}; font-weight: 900; font-size: 8px;")
+        self.r_score_now.setStyleSheet(f"color: {THEME['green']}; font-weight: 900; font-size: 12px;")
+        self.r_proj.setStyleSheet(f"color: {THEME['cyan']}; font-weight: 900; font-size: 12px;")
+        scores_row.addWidget(sn)
+        scores_row.addWidget(self.r_score_now)
+        scores_row.addSpacing(16)
+        scores_row.addWidget(pj)
+        scores_row.addWidget(self.r_proj)
+        scores_row.addStretch()
+        risk_outer.addLayout(scores_row)
+
+        self.risk_panel.body_layout.addLayout(risk_outer)
+        grid.addWidget(self.risk_panel, 0, 2)
+
+        # Middle row: center column empty, right = system log
+        mid_spacer = QWidget()
+        mid_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        grid.addWidget(mid_spacer, 1, 1)
+
+        self.syslog_panel = NeonPanel("SYSTEM LOG", accent=THEME["magenta"])
+        self.syslog = SystemLogWidget()
+        self.syslog_panel.body_layout.addWidget(self.syslog, 1)
+        grid.addWidget(self.syslog_panel, 1, 2)
+
+        # Bottom row: generated plan (center), results (right)
+        self.plan_panel = NeonPanel("GENERATED PLAN OUTPUT", accent=THEME["cyan"])
+        self.plan_text = QTextEdit()
+        self.plan_text.setReadOnly(True)
+        self.plan_panel.body_layout.addWidget(self.plan_text, 1)
+        grid.addWidget(self.plan_panel, 2, 1)
+
+        self.results_panel = NeonPanel("RESULTS CARD", accent=THEME["cyan"])
+        self.results = ResultsCardWidget()
+        self.results.export.clicked.connect(self._export_script)
+        self.results_panel.body_layout.addWidget(self.results)
+        grid.addWidget(self.results_panel, 2, 2)
+
+        # Hidden pipeline widgets (logic still uses these)
+        self._pipeline_host = QWidget()
+        self._pipeline_host.hide()
+        ph = QVBoxLayout(self._pipeline_host)
+        ph.setContentsMargins(0, 0, 0, 0)
         self.flow_indicator = FlowIndicator()
-        main_layout.addWidget(self.flow_indicator)
-        
-        # Chart stack (compact)
+        self.flow_indicator.setMaximumHeight(40)
+        ph.addWidget(self.flow_indicator)
         self.chart_stack = QStackedWidget()
-        self.chart_stack.setMaximumHeight(150)
-        
+        self.chart_stack.setMaximumHeight(140)
         self.clean_view = CleanGraphWidget()
         self.chart_stack.addWidget(self.clean_view)
-        
         self.chart = ThreeBarChartWidget()
         self.chart_stack.addWidget(self.chart)
-        
-        main_layout.addWidget(self.chart_stack)
-        
-        # Toolbox for secondary widgets
-        self.toolbox = QToolBox()
-        self.toolbox.setMinimumHeight(250)
-        
-        # Strategy comparison in toolbox
-        self.strategy_comparison = StrategyComparisonWidget()
-        self.toolbox.addItem(self.strategy_comparison, "🎯 Strategy Comparison")
-        
-        # Script diff in toolbox
-        self.script_diff = ScriptDiffWidget()
-        self.toolbox.addItem(self.script_diff, "🔄 Plan Comparison")
-        
-        # Script preview in toolbox
+        ph.addWidget(self.chart_stack)
         self.script_preview = ScriptPreviewWidget()
-        self.toolbox.addItem(self.script_preview, "📜 Script Preview")
-        
-        main_layout.addWidget(self.toolbox)
-        
-        # Buttons
-        buttons_widget = self._create_buttons()
-        main_layout.addWidget(buttons_widget)
-        
-        # Main content splitter - Risk panel + Categories
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setChildrenCollapsible(False)
-        
-        # Left panel - Risk widgets
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(5, 5, 5, 5)
-        left_layout.setSpacing(8)
-        
         self.live_risk = LiveRiskWidget()
-        left_layout.addWidget(self.live_risk)
-        
-        # Progress
-        self.progress = QProgressBar()
-        self.progress.hide()
-        left_layout.addWidget(self.progress)
-        
-        # Status
-        self.status = QLabel("Ready")
-        self.status.setStyleSheet("color: #00ff00; padding: 4px;")
-        left_layout.addWidget(self.status)
-        
-        # Log (compact)
-        self.log = QTextEdit()
-        self.log.setMaximumHeight(80)
-        self.log.setReadOnly(True)
-        left_layout.addWidget(self.log)
-        
-        left_layout.addStretch()
-        
-        # Center panel - Categories with tabs
-        center_panel = QWidget()
-        center_layout = QVBoxLayout(center_panel)
-        center_layout.setContentsMargins(0, 0, 0, 0)
-        
+        self.live_risk.hide()
+        ph.addWidget(self.live_risk)
         self.category_tabs = QTabWidget()
-        
         self.original_tab = QWidget()
         self.original_tab_layout = QVBoxLayout(self.original_tab)
         self.original_tab_layout.setContentsMargins(0, 0, 0, 0)
-        self.category_tabs.addTab(self.original_tab, "Original Plan")
-        
+        self.category_tabs.addTab(self.original_tab, "ORIGINAL")
         self.refined_tab = QWidget()
         self.refined_tab_layout = QVBoxLayout(self.refined_tab)
         self.refined_tab_layout.setContentsMargins(0, 0, 0, 0)
-        self.category_tabs.addTab(self.refined_tab, "Refined Plan")
-        
-        center_layout.addWidget(self.category_tabs)
-        
-        self.splitter.addWidget(left_panel)
-        self.splitter.addWidget(center_panel)
-        self.splitter.setSizes([300, 700])
-        
-        main_layout.addWidget(self.splitter, 1)
-    
+        self.category_tabs.addTab(self.refined_tab, "REFINED")
+        ph.addWidget(self.category_tabs)
+        self.toolbox = QToolBox()
+        self.strategy_comparison = StrategyComparisonWidget()
+        self.toolbox.addItem(self.strategy_comparison, "Strategy")
+        self.script_diff = ScriptDiffWidget()
+        self.toolbox.addItem(self.script_diff, "Diff")
+        self.toolbox.addItem(self.script_preview, "Script")
+        ph.addWidget(self.toolbox)
+
+        self.card_score = MetricCard("AI SCORE", "--", accent=THEME["green"])
+        self.card_projected = MetricCard("PROJECTED", "--", accent=THEME["cyan"])
+        self.card_gain = MetricCard("GAIN", "--", accent=THEME["green"])
+        self.card_conf = MetricCard("CONFIDENCE", "--", accent=THEME["yellow"])
+        for c in (self.card_score, self.card_projected, self.card_gain, self.card_conf):
+            c.setParent(self._pipeline_host)
+            c.hide()
+
+        # Row/col stretch — screenshot: top row shorter, middle tall, bottom moderate
+        grid.setColumnStretch(0, 34)
+        grid.setColumnStretch(1, 38)
+        grid.setColumnStretch(2, 28)
+        grid.setRowStretch(0, 24)
+        grid.setRowStretch(1, 46)
+        grid.setRowStretch(2, 30)
+
+        content.addWidget(dashboard, 1)
+        root.addLayout(content, 1)
+        # Pipeline widgets not shown in main grid (still wired for workers)
+        self._pipeline_host.setParent(central)
+        self._pipeline_host.hide()
+
+    def _create_subbar(self):
+        """Secondary bar like screenshot: stats + pipeline buttons (not in task list)."""
+        bar = QHBoxLayout()
+        bar.setSpacing(12)
+        bar.setContentsMargins(0, 2, 0, 4)
+        self.subbar_stats = QLabel("94%  |  TASKS: 0 QUEUED  |  EXPORT READY")
+        self.subbar_stats.setStyleSheet(f"color: {THEME['cyan']}; font-weight: 700; letter-spacing: 1px; font-size: 9px;")
+        bar.addWidget(self.subbar_stats)
+        bar.addStretch()
+        btn_row = self._create_buttons()
+        bar.addWidget(btn_row)
+        self.status = QLabel("Ready")
+        self.status.setObjectName("statusLine")
+        bar.addWidget(self.status)
+        self.progress = QProgressBar()
+        self.progress.setMaximumWidth(160)
+        self.progress.hide()
+        bar.addWidget(self.progress)
+        return bar
+
     def _create_header(self):
         hdr = QHBoxLayout()
         hdr.setSpacing(10)
-        title = QLabel("Z-ENGINE")
-        title.setFont(QFont("Arial", 18, QFont.Weight.Bold))
-        title.setStyleSheet("color: #00ffff;")
+        title = QLabel("OPTICORE")
+        title.setFont(QFont("Bahnschrift", 14, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {THEME['magenta']}; letter-spacing: 3px; font-weight: 900;")
         hdr.addWidget(title)
         
-        subtitle = QLabel("Generates · Engineers · Deploys")
-        subtitle.setFont(QFont("Arial", 10))
-        subtitle.setStyleSheet("color: #88ff88;")
-        hdr.addWidget(subtitle)
+        steps = QWidget()
+        steps_layout = QHBoxLayout(steps)
+        steps_layout.setContentsMargins(0, 0, 0, 0)
+        steps_layout.setSpacing(6)
+
+        self.step_badges = []
+        for i, name in enumerate(["SCAN", "ANALYZE", "PLAN", "REVIEW", "REFINE"]):
+            b = QLabel(f"{i+1}  {name}")
+            b.setObjectName("stepBadge")
+            b.setStyleSheet("""
+                QLabel {
+                    padding: 5px 8px;
+                    border-radius: 0px;
+                    border: 1px solid rgba(120,255,255,0.14);
+                    background: rgba(12,16,26,0.85);
+                    color: rgba(240,245,255,0.72);
+                    font-weight: 900;
+                    letter-spacing: 1px;
+                    font-size: 10px;
+                }
+            """)
+            self.step_badges.append(b)
+            steps_layout.addWidget(b)
+
+        hdr.addWidget(steps)
         
         hdr.addStretch()
         
@@ -266,11 +428,208 @@ class MainWindow(QMainWindow):
         self.details_btn.setEnabled(False)
         hdr.addWidget(self.details_btn)
         
-        self.api_label = QLabel("⚪ READY")
-        self.api_label.setStyleSheet("border: 1px solid #666; padding: 4px 8px; border-radius: 4px;")
+        self.api_label = QLabel("PLAN READY")
+        self.api_label.setStyleSheet(f"border: 1px solid rgba(46,243,255,0.22); padding: 6px 10px; border-radius: 10px; color: {THEME['muted']}; font-weight: 900; letter-spacing: 1px;")
         hdr.addWidget(self.api_label)
         
         return hdr
+
+    def _create_left_rail(self) -> QWidget:
+        rail = QFrame()
+        rail.setObjectName("leftRail")
+        rail.setFixedWidth(54)
+        rail.setStyleSheet(f"""
+            QFrame#leftRail {{
+                background: {THEME["panel2"]};
+                border: 1px solid {THEME["border"]};
+                border-radius: 0px;
+            }}
+            QPushButton {{
+                background: transparent;
+                border: 1px solid rgba(120,255,255,0.12);
+                border-radius: 0px;
+                min-height: 38px;
+                min-width: 38px;
+                max-height: 38px;
+                max-width: 38px;
+                padding: 0px;
+                color: rgba(240,245,255,0.65);
+                font-weight: 900;
+            }}
+            QPushButton:hover {{
+                border: 1px solid rgba(46,243,255,0.45);
+                color: {THEME["cyan"]};
+                background: rgba(46,243,255,0.06);
+            }}
+        """)
+
+        layout = QVBoxLayout(rail)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        brand = QLabel("O")
+        brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        brand.setStyleSheet(f"color: {THEME['cyan']}; font-weight: 900; font-size: 14px;")
+        layout.addWidget(brand)
+
+        for txt in ["▦", "◧", "◎", "≋", "⟠"]:
+            btn = QPushButton(txt)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            layout.addWidget(btn)
+
+        layout.addStretch()
+        return rail
+
+    def _apply_global_style(self):
+        self.setStyleSheet(f"""
+            QMainWindow, QWidget {{
+                background-color: {THEME["bg"]};
+                color: {THEME["text"]};
+                font-family: "Bahnschrift", "Segoe UI", "Arial";
+                font-size: 10px;
+            }}
+            QGroupBox {{
+                border: 1px solid rgba(78,130,160,0.18);
+                border-radius: 0px;
+                margin-top: 10px;
+                padding: 8px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px 0 6px;
+                color: {THEME["muted"]};
+                letter-spacing: 2px;
+                font-weight: 900;
+                font-size: 9px;
+            }}
+            QPushButton {{
+                background-color: rgba(12, 16, 26, 0.80);
+                color: rgba(240,248,255,0.80);
+                border: 1px solid rgba(78,130,160,0.18);
+                padding: 6px 10px;
+                border-radius: 0px;
+                font-weight: 900;
+                letter-spacing: 1px;
+            }}
+            QPushButton:hover {{
+                border: 1px solid rgba(43,242,255,0.40);
+                color: {THEME["cyan"]};
+                background-color: rgba(12, 16, 26, 0.95);
+            }}
+            QPushButton:disabled {{
+                color: rgba(240,248,255,0.25);
+                border: 1px solid rgba(78,130,160,0.10);
+                background-color: rgba(7, 10, 16, 0.60);
+            }}
+            QTextEdit {{
+                background-color: rgba(10, 13, 19, 0.95);
+                border: 1px solid rgba(78,130,160,0.16);
+                border-radius: 0px;
+                padding: 8px;
+                font-family: "Consolas", "Courier New", monospace;
+                color: rgba(240,248,255,0.62);
+            }}
+            QTabWidget::pane {{
+                border: 1px solid rgba(78,130,160,0.16);
+                border-radius: 0px;
+                background: rgba(7, 10, 16, 0.65);
+            }}
+            QTabBar::tab {{
+                background-color: rgba(12, 16, 26, 0.80);
+                color: rgba(240,248,255,0.60);
+                border: 1px solid rgba(78,130,160,0.16);
+                padding: 5px 10px;
+                margin-right: 4px;
+                border-radius: 0px;
+                font-weight: 900;
+                letter-spacing: 2px;
+                font-size: 9px;
+            }}
+            QTabBar::tab:selected {{
+                background-color: rgba(43,242,255,0.10);
+                border: 1px solid rgba(43,242,255,0.45);
+                color: {THEME["cyan"]};
+            }}
+            QToolBox::tab {{
+                background-color: rgba(12, 16, 26, 0.80);
+                color: rgba(240,248,255,0.64);
+                border: 1px solid rgba(78,130,160,0.16);
+                border-radius: 0px;
+                padding: 7px 10px;
+                margin-top: 6px;
+                font-weight: 900;
+                letter-spacing: 2px;
+                font-size: 9px;
+            }}
+            QToolBox::tab:selected {{
+                border: 1px solid rgba(43,242,255,0.45);
+                color: {THEME["cyan"]};
+                background-color: rgba(43,242,255,0.08);
+            }}
+            QLabel#statusLine {{
+                color: rgba(230,230,230,0.75);
+                padding: 4px 2px;
+            }}
+            QProgressBar {{
+                border: 1px solid rgba(78,130,160,0.16);
+                border-radius: 0px;
+                text-align: center;
+                background: rgba(10, 13, 19, 0.95);
+                color: rgba(240,248,255,0.70);
+                font-weight: 900;
+                letter-spacing: 1px;
+            }}
+            QProgressBar::chunk {{
+                background-color: rgba(43,242,255,0.35);
+                border-radius: 0px;
+            }}
+        """)
+
+    def _set_step_stage(self, stage: int):
+        # stage is 0..4, highlight current and previous like the screenshot nav.
+        if not hasattr(self, "step_badges") or not self.step_badges:
+            return
+        for i, b in enumerate(self.step_badges):
+            if i < stage:
+                b.setStyleSheet(f"""
+                    QLabel {{
+                        padding: 6px 10px;
+                        border-radius: 10px;
+                        border: 1px solid rgba(66,255,158,0.45);
+                        background: rgba(66,255,158,0.10);
+                        color: {THEME["green"]};
+                        font-weight: 900;
+                        letter-spacing: 1px;
+                        font-size: 10px;
+                    }}
+                """)
+            elif i == stage:
+                b.setStyleSheet(f"""
+                    QLabel {{
+                        padding: 6px 10px;
+                        border-radius: 10px;
+                        border: 1px solid rgba(46,243,255,0.65);
+                        background: rgba(46,243,255,0.10);
+                        color: {THEME["cyan"]};
+                        font-weight: 900;
+                        letter-spacing: 1px;
+                        font-size: 10px;
+                    }}
+                """)
+            else:
+                b.setStyleSheet("""
+                    QLabel {
+                        padding: 6px 10px;
+                        border-radius: 10px;
+                        border: 1px solid rgba(120,255,255,0.14);
+                        background: rgba(12,16,26,0.85);
+                        color: rgba(240,245,255,0.72);
+                        font-weight: 900;
+                        letter-spacing: 1px;
+                        font-size: 10px;
+                    }
+                """)
     
     def _create_buttons(self):
         buttons_widget = QWidget()
@@ -357,18 +716,27 @@ class MainWindow(QMainWindow):
         return buttons_widget
     
     def log_msg(self, msg: str, level="INFO"):
-        self.log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}")
+        line = f"[{datetime.datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}"
+        try:
+            if hasattr(self, "syslog") and self.syslog:
+                self.syslog.append(line)
+            if hasattr(self, "plan_text") and self.plan_text:
+                # Keep latest important lines visible in the plan pane as well.
+                if level in ["ERROR", "WARN"]:
+                    self.plan_text.append(line)
+        except Exception:
+            pass
     
     def set_api_status(self, status: str, error: Optional[str] = None):
         if status == "online":
-            self.api_label.setText("🟢 ASI-1 ONLINE")
-            self.api_label.setStyleSheet("border: 1px solid #00ff00; padding: 4px 8px; border-radius: 4px;")
+            self.api_label.setText("PLAN READY")
+            self.api_label.setStyleSheet(f"border: 1px solid rgba(66,255,158,0.35); padding: 6px 10px; border-radius: 10px; color: {THEME['green']}; font-weight: 900; letter-spacing: 1px;")
         elif status == "error":
-            self.api_label.setText("🔴 ERROR")
-            self.api_label.setStyleSheet("border: 1px solid #ff0000; padding: 4px 8px; border-radius: 4px;")
+            self.api_label.setText("API ERROR")
+            self.api_label.setStyleSheet(f"border: 1px solid rgba(255,77,109,0.35); padding: 6px 10px; border-radius: 10px; color: {THEME['red']}; font-weight: 900; letter-spacing: 1px;")
         else:
-            self.api_label.setText("⚪ READY")
-            self.api_label.setStyleSheet("border: 1px solid #666; padding: 4px 8px; border-radius: 4px;")
+            self.api_label.setText("STANDBY")
+            self.api_label.setStyleSheet(f"border: 1px solid rgba(46,243,255,0.18); padding: 6px 10px; border-radius: 10px; color: {THEME['muted']}; font-weight: 900; letter-spacing: 1px;")
     
     def _show_system_details(self):
         if self.snapshot:
@@ -384,6 +752,7 @@ class MainWindow(QMainWindow):
         self._cleanup_workers()
         self._clear_all_categories()
         self.flow_indicator.set_stage(0)
+        self._set_step_stage(0)
         self.analyzer.client.start_pipeline()
         
         self.scan_worker = ScanWorker()
@@ -395,6 +764,11 @@ class MainWindow(QMainWindow):
         self.scan_btn.setEnabled(True)
         self.details_btn.setEnabled(True)
         
+        try:
+            self._update_system_summary(snapshot)
+        except Exception as e:
+            self.log_msg(f"UI summary update failed: {e}", "WARN")
+
         if snapshot.get("error"):
             self.log_msg(f"Scan error: {snapshot['error']}", "ERROR")
             return
@@ -404,6 +778,7 @@ class MainWindow(QMainWindow):
         self.simulate_btn.setEnabled(True)
         self.set_api_status("online")
         self.flow_indicator.set_stage(1)
+        self._set_step_stage(1)
         self.chart_stack.setCurrentWidget(self.clean_view)
         
         self.scan_worker = None
@@ -415,6 +790,7 @@ class MainWindow(QMainWindow):
         self.log_msg("Calling ASI-1 for analysis...")
         self.analyze_btn.setEnabled(False)
         self.flow_indicator.set_stage(1)
+        self._set_step_stage(1)
         
         self._stop_worker(self.analyze_worker)
         self.analyze_worker = AnalyzeWorker(self.analyzer, self.snapshot)
@@ -428,10 +804,22 @@ class MainWindow(QMainWindow):
             self.log_msg(f"Analysis issue: {metrics.error}", "WARN")
         
         self.log_msg(f"ASI-1 score: {metrics.overall_score}")
-        self.status.setText(f"Score: {metrics.overall_score}")
+        self.status.setText(f"AI score: {metrics.overall_score}")
         self.clean_view.set_score(metrics.overall_score)
         self.chart.update_scores(metrics.overall_score)
         self.flow_indicator.set_stage(2)
+        self._set_step_stage(2)
+
+        # Drive center analysis + results values
+        try:
+            self.live_analysis.set_metrics(
+                cpu=24, mem=61, disk_io=18, net=27, stability=min(100, max(0, metrics.overall_score))
+            )
+            self.results.before.setText(str(metrics.overall_score))
+            if hasattr(self, "r_score_now"):
+                self.r_score_now.setText(str(metrics.overall_score))
+        except Exception:
+            pass
         
         if self.thought_trace_visible and self.thought_trace_widget:
             self.thought_trace_widget.update_trace(self.analyzer.client.get_thought_trace())
@@ -461,6 +849,7 @@ class MainWindow(QMainWindow):
         
         self.insight_worker = None
         self.plan_btn.setEnabled(True)
+        self._set_step_stage(2)
     
     def _generate_plan(self):
         if not self.snapshot or not self.metrics:
@@ -469,6 +858,7 @@ class MainWindow(QMainWindow):
         self.log_msg("Generating optimization plan...")
         self.plan_btn.setEnabled(False)
         self.flow_indicator.set_stage(2)
+        self._set_step_stage(2)
         
         self.chart_stack.setCurrentWidget(self.chart)
         
@@ -493,6 +883,7 @@ class MainWindow(QMainWindow):
             original_projected=projected
         )
         self.flow_indicator.set_stage(3)
+        self._set_step_stage(3)
         
         if self.thought_trace_visible and self.thought_trace_widget:
             self.thought_trace_widget.update_trace(self.analyzer.client.get_thought_trace())
@@ -500,6 +891,34 @@ class MainWindow(QMainWindow):
         self.plan_worker = None
         self._display_original_plan()
         self._get_plan_critique()
+
+        if self.metrics and self.metrics.overall_score is not None and projected is not None:
+            gain = projected - self.metrics.overall_score
+            try:
+                self.results.after.setText(str(projected))
+                self.results.delta.setText(f"{gain:+d}")
+                if hasattr(self, "r_proj"):
+                    self.r_proj.setText(str(projected))
+            except Exception:
+                pass
+
+        try:
+            # Also mirror into script preview for export.
+            selected = []
+            for cat in self.original_categories:
+                selected.extend(cat.tasks[:2])
+            self.script_preview.update_script(selected)
+
+            # Render plan output text block
+            lines = []
+            for cat in self.original_categories:
+                lines.append(f"[{cat.name}]")
+                for t in cat.tasks[:6]:
+                    lines.append(f"- {t.description}")
+                lines.append("")
+            self.plan_text.setPlainText("\n".join(lines).strip())
+        except Exception:
+            pass
     
     def _display_original_plan(self):
         self._clear_tab_layout(self.original_tab_layout)
@@ -544,6 +963,7 @@ class MainWindow(QMainWindow):
         if critique:
             self.log_msg("Self-review complete")
             self.flow_indicator.set_stage(4)
+            self._set_step_stage(4)
             
             if self.thought_trace_visible and self.thought_trace_widget:
                 self.thought_trace_widget.update_trace(self.analyzer.client.get_thought_trace())
@@ -592,6 +1012,15 @@ class MainWindow(QMainWindow):
         
         self.log_msg(f"Refined strategy ready: +{gain} gain, -{self.risk_reduction:.0f}% risk")
         self.flow_indicator.set_stage(4)
+        self._set_step_stage(4)
+
+        # Update right-side metrics
+        if self.metrics and self.metrics.overall_score is not None and self.refined_projected is not None:
+            rgain = self.refined_projected - self.metrics.overall_score
+            self.card_projected.set_value(str(self.refined_projected), sub="refined")
+            self.card_gain.set_value(f"{rgain:+d}", sub=f"-{self.risk_reduction:.0f}% risk")
+            if hasattr(self, "r_proj"):
+                self.r_proj.setText(str(self.refined_projected))
         
         if self.thought_trace_visible and self.thought_trace_widget:
             self.thought_trace_widget.update_trace(self.analyzer.client.get_thought_trace())
@@ -629,6 +1058,16 @@ class MainWindow(QMainWindow):
         self._display_refined_plan()
         self.export_btn.setEnabled(True)
         self.reverse_btn.setEnabled(True)
+
+        self.card_conf.set_value(f"{int(self.confidence_score)}%")
+        if hasattr(self, "r_conf"):
+            self.r_conf.setText(f"{int(self.confidence_score)}%")
+
+        # Drive donut gauge (rough mapping: more risk reduction -> lower risk)
+        rr = float(self.risk_reduction or 0)
+        risk = int(max(0, min(100, 80 - rr)))
+        legend = "LOW" if risk < 35 else ("MED" if risk < 70 else "HIGH")
+        self.donut.set_value(risk, legend=legend)
     
     def _display_refined_plan(self):
         self._clear_tab_layout(self.refined_tab_layout)
@@ -693,9 +1132,9 @@ class MainWindow(QMainWindow):
             
             is_refined = self.category_tabs.currentIndex() == 1
             if is_refined:
-                self.live_risk.set_color("#00ffff", "#001122")
+                self.live_risk.set_color(THEME["cyan"], THEME["panel2"])
             else:
-                self.live_risk.set_color("#ffaa00", "#221100")
+                self.live_risk.set_color(THEME["yellow"], THEME["panel2"])
             self.live_risk.update_risk(selected, self.metrics.overall_score)
             
             if self.metrics:
@@ -718,6 +1157,50 @@ class MainWindow(QMainWindow):
                 original_projected=self.original_projected,
                 refined_projected=self.refined_projected
             )
+
+    def _update_system_summary(self, snapshot: dict):
+        sys_info = snapshot.get("system", {}) if snapshot else {}
+        cpu_info = snapshot.get("cpu", {}) if snapshot else {}
+        mem_info = snapshot.get("memory", {}) if snapshot else {}
+
+        os_name = sys_info.get("os", "Unknown")
+        host = sys_info.get("hostname", "Unknown")
+        uptime_days = sys_info.get("uptime_days", None)
+        uptime = f"{uptime_days} days" if uptime_days is not None else "Unknown"
+
+        cpu_usage = cpu_info.get("usage_percent", None)
+        cpu_freq = cpu_info.get("frequency_mhz", None)
+        cpu_txt = "Unknown"
+        if cpu_usage is not None and cpu_freq is not None:
+            cpu_txt = f"{cpu_usage}% @ {cpu_freq}MHz"
+        elif cpu_usage is not None:
+            cpu_txt = f"{cpu_usage}%"
+
+        mem_used = mem_info.get("used_gb", None)
+        mem_total = mem_info.get("total_gb", None)
+        mem_pct = mem_info.get("usage_percent", None)
+        mem_txt = "Unknown"
+        if mem_used is not None and mem_total is not None and mem_pct is not None:
+            mem_txt = f"{mem_used}/{mem_total}GB ({mem_pct}%)"
+        elif mem_used is not None and mem_total is not None:
+            mem_txt = f"{mem_used}/{mem_total}GB"
+
+        self.sys_os.setText(str(os_name)[:32])
+        self.sys_host.setText(str(host)[:32])
+        phys = cpu_info.get("cores_physical", 0)
+        logi = cpu_info.get("cores_logical", 0)
+        if phys or logi:
+            self.sys_cpu.setText(f"{phys}C/{logi}T"[:32])
+        else:
+            self.sys_cpu.setText(str(cpu_txt)[:32])
+        if mem_total is not None:
+            self.sys_mem.setText(f"{mem_total} GB"[:32])
+        else:
+            self.sys_mem.setText(str(mem_txt)[:32])
+        self.sys_uptime.setText(str(uptime)[:32])
+        proc_count = len(snapshot.get("processes", []) or [])
+        if proc_count:
+            self.sys_score.setText(str(proc_count))
     
     def _get_selected(self) -> List[OptimizationTask]:
         selected = []
