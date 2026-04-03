@@ -8,9 +8,10 @@ import os
 from PySide6.QtWidgets import (
     QFrame, QLabel, QHBoxLayout, QVBoxLayout, QGridLayout,
     QPushButton, QCheckBox, QProgressBar, QPlainTextEdit,
-    QGroupBox, QScrollArea, QToolBox, QWidget, QMessageBox
+    QGroupBox, QScrollArea, QToolBox, QWidget, QMessageBox,
+    QGraphicsOpacityEffect
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QRectF
+from PySide6.QtCore import Qt, Signal, QTimer, QRectF, Property, QPropertyAnimation, QParallelAnimationGroup, QEasingCurve
 from PySide6.QtGui import QFont, QColor, QPainter, QPen
 
 from zengine.models import OptimizationTask, OptimizationCategory, StrategyOption
@@ -35,79 +36,154 @@ THEME = {
 }
 
 
-class TaskChecklistWidget(QFrame):
-    """Left-side optimization task checklist like the reference screenshot."""
+class TaskRow(QWidget):
+    def __init__(self, desc: str, risk: str, pts: str, pill_style: str, parent=None):
+        super().__init__(parent)
+        self.outer_layout = QHBoxLayout(self)
+        self.outer_layout.setContentsMargins(8, 4, 4, 4)
+        self.outer_layout.setSpacing(0)
+        
+        self.inner = QFrame()
+        self.inner.setObjectName("innerRow")
+        self.inner.setStyleSheet("""
+            QFrame#innerRow {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+            }
+        """)
+        
+        r = QHBoxLayout(self.inner)
+        r.setContentsMargins(4, 2, 4, 2)
+        r.setSpacing(6)
+        
+        cb = QCheckBox(desc)
+        cb.setMinimumWidth(160)
+        cb.stateChanged.connect(self._on_toggle)
+        r.addWidget(cb, 1)
+
+        pill = QLabel(f"{pts} | {risk}")
+        pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pill.setStyleSheet(pill_style)
+        r.addWidget(pill, 0, Qt.AlignmentFlag.AlignRight)
+        
+        self.outer_layout.addWidget(self.inner)
+
+    def _on_toggle(self, state):
+        if state:
+            self.inner.setStyleSheet("""
+                QFrame#innerRow {
+                    background: rgba(0, 255, 255, 0.08); /* roughly #0ff1 */
+                    border: 1px solid rgba(0, 255, 255, 0.4); /* #0ff6 */
+                    border-radius: 4px;
+                }
+            """)
+        else:
+            self.inner.setStyleSheet("""
+                QFrame#innerRow {
+                    background: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 4px;
+                }
+            """)
+
+    def get_offset(self):
+        return self.outer_layout.contentsMargins().left()
+
+    def set_offset(self, val):
+        self.outer_layout.setContentsMargins(val, 4, 4, 4)
+
+    offset = Property(int, get_offset, set_offset)
+
+
+class TaskChecklistWidget(QScrollArea):
+    """Horizontal scrolling track for generating AI tasks. Now vertically stacks."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("taskChecklist")
-        self.setStyleSheet(f"""
-            QFrame#taskChecklist {{
-                background: transparent;
-                border: none;
-            }}
-            QCheckBox {{
-                spacing: 10px;
-                color: {THEME["text"]};
-                font-weight: 700;
-                font-size: 10px;
-            }}
-            QCheckBox::indicator {{
-                width: 12px;
-                height: 12px;
-                border: 1px solid {THEME["border2"]};
-                background: rgba(7,10,16,0.8);
-            }}
-            QCheckBox::indicator:checked {{
-                background: rgba(43,242,255,0.18);
-                border: 1px solid rgba(43,242,255,0.55);
-            }}
-        """)
+        self.setWidgetResizable(True)
+        self.setStyleSheet("background: transparent; border: none;")
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
+        # Main scroll container
+        self.container = QWidget()
+        self.container.setStyleSheet("background: transparent;")
+        self.layout = QVBoxLayout(self.container)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(8)
+        
+        self.setWidget(self.container)
         self.rows = []
-        for label, status, pts in [
-            ("Clear temp + prefetch cache", "SAFE", "+4"),
-            ("Disable startup bloatware", "SAFE", "+2"),
-            ("Optimize virtual memory", "CAUTION", "+5"),
-            ("Rebuild WMI repository", "SAFE", "+1"),
-            ("Flush DNS / reset Winsock", "SAFE", "+3"),
-            ("Disable redundant services", "CAUTION", "+6"),
-            ("Defrag pagefile", "SAFE", "+2"),
-            ("Clear event log backlog", "SAFE", "+1"),
-        ]:
-            row = QWidget()
-            r = QHBoxLayout(row)
-            r.setContentsMargins(0, 0, 0, 0)
-            r.setSpacing(8)
+        self._animations = []
 
-            cb = QCheckBox(label)
-            r.addWidget(cb, 1)
+    def clear_tasks(self):
+        while self.layout.count():
+            item = self.layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.rows.clear()
+        self._animations.clear()
+        
+    def set_tasks(self, tasks: list):
+        self.clear_tasks()
+        
+        for i, task in enumerate(tasks):
+            desc = getattr(task, 'description', 'Task')
+            rval = getattr(task, 'risk', 'SAFE')
+            risk = getattr(rval, 'name', str(rval)).upper()
+            pval = int(getattr(task, 'impact_on_stability', 2))
+            pts = f"+{pval}"
+            
+            row = TaskRow(desc, risk, pts, self._pill_style(risk, pval))
+            
+            eff = QGraphicsOpacityEffect(row)
+            eff.setOpacity(0.0)
+            row.setGraphicsEffect(eff)
+            
+            # Slide in animation
+            anim_group = QParallelAnimationGroup(self)
+            
+            op_anim = QPropertyAnimation(eff, b"opacity")
+            op_anim.setDuration(400)
+            op_anim.setStartValue(0.0)
+            op_anim.setEndValue(1.0)
+            op_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim_group.addAnimation(op_anim)
+            
+            pos_anim = QPropertyAnimation(row, b"offset")
+            pos_anim.setDuration(400)
+            pos_anim.setStartValue(8)
+            pos_anim.setEndValue(0)
+            pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim_group.addAnimation(pos_anim)
+            
+            QTimer.singleShot(i * 120, anim_group.start)
+            self._animations.append(anim_group)
+            
+            self.layout.addWidget(row)
+            self.rows.append(row)
 
-            pill = QLabel(f"{status} {pts}")
-            pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            pill.setMinimumWidth(88)
-            pill.setStyleSheet(self._pill_style(status))
-            r.addWidget(pill, 0, Qt.AlignmentFlag.AlignRight)
+        self.layout.addStretch()
 
-            layout.addWidget(row)
-            self.rows.append((cb, pill))
-
-        layout.addStretch()
-
-    def _pill_style(self, status: str) -> str:
+    def _pill_style(self, status: str, pts: int) -> str:
         status = status.upper()
         if status == "SAFE":
-            bg = "rgba(56,255,143,0.12)"
-            fg = THEME["green"]
-            br = "rgba(56,255,143,0.35)"
+            fg = "#0f8"
+            bg = "rgba(0, 255, 136, 0.12)"
+            br = "rgba(0, 255, 136, 0.4)"
+        elif status == "CAUTION" or status == "MEDIUM":
+            fg = "#fa0"
+            bg = "rgba(255, 170, 0, 0.12)"
+            br = "rgba(255, 170, 0, 0.4)"
+        elif "GAIN" in status or pts > 4:
+            fg = "#f0f"
+            bg = "rgba(255, 0, 255, 0.12)"
+            br = "rgba(255, 0, 255, 0.4)"
         else:
-            bg = "rgba(255,208,106,0.12)"
-            fg = THEME["yellow"]
-            br = "rgba(255,208,106,0.35)"
+            fg = THEME["magenta"]
+            bg = "rgba(255, 0, 255, 0.12)"
+            br = "rgba(255, 0, 255, 0.35)"
+            
         return f"""
             QLabel {{
                 background: {bg};
@@ -122,8 +198,155 @@ class TaskChecklistWidget(QFrame):
         """
 
 
+class PlanCardWrapper(QWidget):
+    def __init__(self, task, parent=None):
+        super().__init__(parent)
+        self.outer_layout = QHBoxLayout(self)
+        self.outer_layout.setContentsMargins(8, 0, 0, 0)
+        self.outer_layout.setSpacing(0)
+
+        self.inner = QFrame()
+        self.inner.setObjectName("planCard")
+        self.inner.setStyleSheet("""
+            QFrame#planCard {
+                border-left: 2px solid rgba(0, 255, 255, 0.25);
+                background: rgba(0, 255, 255, 0.02);
+                border-top-right-radius: 2px;
+                border-bottom-right-radius: 2px;
+                border-top-left-radius: 0px;
+                border-bottom-left-radius: 0px;
+                border-top: none;
+                border-right: none;
+                border-bottom: none;
+            }
+        """)
+
+        layout = QVBoxLayout(self.inner)
+        layout.setContentsMargins(10, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # Title: Bold Cyan uppercase
+        # We try to use the category name of the task, fallback to 'SYSTEM OPTIMIZATION'
+        cat_name = getattr(task, 'category', 'SYSTEM OPTIMIZATION')
+        title = QLabel(str(cat_name).upper())
+        title.setStyleSheet("color: #0ff; font-weight: bold; font-size: 11px; letter-spacing: 1px;")
+        layout.addWidget(title)
+
+        # Description: Dimmed Cyan
+        desc = getattr(task, 'description', '')
+        desc_lbl = QLabel(desc)
+        desc_lbl.setWordWrap(True)
+        desc_lbl.setStyleSheet("color: rgba(0, 255, 255, 0.5); font-size: 9px;")
+        layout.addWidget(desc_lbl)
+
+        # Bottom Chips Section
+        chips = QHBoxLayout()
+        chips.setSpacing(6)
+
+        rval = getattr(task, 'risk', 'SAFE')
+        risk_str = getattr(rval, 'name', str(rval)).upper()
+        pts = getattr(task, 'impact_on_stability', 2)
+
+        if risk_str == "SAFE":
+            fg = "#0f8"
+            br = "rgba(0, 255, 136, 0.4)"
+        elif risk_str in ["CAUTION", "MEDIUM"]:
+            fg = "#fa0"
+            br = "rgba(255, 170, 0, 0.4)"
+        else:
+            fg = "#f0f"
+            br = "rgba(255, 0, 255, 0.4)"
+
+        # Chip 1: Risk
+        c1 = QLabel(f"[ {risk_str} ]")
+        c1.setStyleSheet(f"color: {fg}; border: 1px solid {br}; padding: 2px 4px; font-weight: 900; font-size: 8px; border-radius: 1px; background: transparent;")
+        
+        # Chip 2: PTS Gain
+        c2 = QLabel(f"+{pts} PTS")
+        c2.setStyleSheet(f"color: {fg}; border: 1px solid {br}; padding: 2px 4px; font-weight: 900; font-size: 8px; border-radius: 1px; background: transparent;")
+
+        chips.addWidget(c1)
+        chips.addWidget(c2)
+        chips.addStretch()
+        layout.addLayout(chips)
+
+        self.outer_layout.addWidget(self.inner)
+
+    def get_offset(self):
+        return self.outer_layout.contentsMargins().left()
+
+    def set_offset(self, val):
+        self.outer_layout.setContentsMargins(val, 0, 0, 0)
+        
+    offset = Property(int, get_offset, set_offset)
+
+
+class GeneratedPlanWidget(QScrollArea):
+    """Vertical scrolling list of stylized plan items."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("generatedPlan")
+        self.setWidgetResizable(True)
+        self.setStyleSheet("background: transparent; border: none;")
+
+        self.container = QWidget()
+        self.container.setStyleSheet("background: transparent;")
+        self.layout = QVBoxLayout(self.container)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(6)
+        
+        self.setWidget(self.container)
+        self._animations = []
+
+    def set_plan(self, categories: list):
+        while self.layout.count():
+            item = self.layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._animations.clear()
+        
+        # Extract flat list of tasks across categories
+        tasks = []
+        if categories:
+            for cat in categories:
+                # Add category name dynamically to task for titling
+                for t in cat.tasks[:6]:
+                    t.category = cat.name
+                    tasks.append(t)
+        
+        for i, task in enumerate(tasks):
+            row = PlanCardWrapper(task)
+            
+            eff = QGraphicsOpacityEffect(row)
+            eff.setOpacity(0.0)
+            row.setGraphicsEffect(eff)
+            
+            anim_group = QParallelAnimationGroup(self)
+            
+            op_anim = QPropertyAnimation(eff, b"opacity")
+            op_anim.setDuration(400)
+            op_anim.setStartValue(0.0)
+            op_anim.setEndValue(1.0)
+            op_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim_group.addAnimation(op_anim)
+            
+            pos_anim = QPropertyAnimation(row, b"offset")
+            pos_anim.setDuration(400)
+            pos_anim.setStartValue(8)
+            pos_anim.setEndValue(0)
+            pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim_group.addAnimation(pos_anim)
+            
+            # Staggered by 200ms
+            QTimer.singleShot(i * 200, anim_group.start)
+            self._animations.append(anim_group)
+            
+            self.layout.addWidget(row)
+
+        self.layout.addStretch()
 class LiveAnalysisWidget(QFrame):
-    """Screenshot: CPU, MEMORY, DISK I/O, NET LOAD, STABILITY + histogram."""
+    """Screenshot: CPU, MEMORY, DISK I/O, NET LOAD, STABILITY (histogram removed)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -134,14 +357,14 @@ class LiveAnalysisWidget(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # Order and colors match reference: lime, cyan, orange, magenta, pale
+        # Order and colors match reference
         self.bars = {}
         for name, color in [
             ("CPU LOAD", "#9aff3a"),
             ("MEMORY", THEME["cyan"]),
             ("DISK I/O", THEME["yellow"]),
             ("NET LOAD", THEME["magenta"]),
-            ("STABILITY", "rgba(200, 230, 255, 0.95)"),
+            ("STABILITY", "rgba(120, 255, 255, 0.65)"),
         ]:
             row = QWidget()
             r = QHBoxLayout(row)
@@ -179,22 +402,7 @@ class LiveAnalysisWidget(QFrame):
             layout.addWidget(row)
             self.bars[name] = (pb, pct)
 
-        # Histogram
-        hist = QWidget()
-        h = QHBoxLayout(hist)
-        h.setContentsMargins(0, 4, 0, 0)
-        h.setSpacing(3)
-        self.hist_bars = []
-        for i in range(24):
-            b = QFrame()
-            b.setFixedWidth(8)
-            height = 22 + (i % 7) * 3
-            b.setFixedHeight(height)
-            b.setStyleSheet(f"background: rgba(120,180,200,0.22); border: 1px solid {THEME['border']};")
-            h.addWidget(b)
-            self.hist_bars.append(b)
-        h.addStretch()
-        layout.addWidget(hist)
+        layout.addStretch()
 
     def set_metrics(self, cpu: int, mem: int, disk_io: int, net: int, stability: int):
         mapping = [
@@ -204,11 +412,24 @@ class LiveAnalysisWidget(QFrame):
             ("NET LOAD", net),
             ("STABILITY", stability),
         ]
-        for name, v in mapping:
+        self._bar_animations = []
+        for i, (name, v) in enumerate(mapping):
             pb, pct = self.bars[name]
             v = max(0, min(100, int(v)))
-            pb.setValue(v)
-            pct.setText(f"{v}%")
+            
+            anim = QPropertyAnimation(pb, b"value")
+            anim.setDuration(800)
+            anim.setStartValue(0)
+            anim.setEndValue(v)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            
+            def set_text(v_now, label=pct):
+                label.setText(f"{v_now}%")
+            
+            anim.valueChanged.connect(set_text)
+            
+            QTimer.singleShot(i * 200, anim.start)
+            self._bar_animations.append(anim)
 
 
 class SystemLogWidget(QFrame):

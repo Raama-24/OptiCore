@@ -12,9 +12,9 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QLabel, QPushButton, QGroupBox, QGridLayout, QTabWidget, QScrollArea,
     QStackedWidget, QToolBox, QTextEdit, QMessageBox, QFileDialog,
-    QMenuBar, QMenu, QProgressBar, QFrame, QSizePolicy
+    QMenuBar, QMenu, QProgressBar, QFrame, QSizePolicy, QGraphicsOpacityEffect
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QAction
 
 from zengine.config import ASI_API_KEY
@@ -32,7 +32,8 @@ from zengine.ui.widgets import (
     FlowIndicator, CleanGraphWidget, ThreeBarChartWidget,
     StrategyComparisonWidget, ScriptDiffWidget, ScriptPreviewWidget,
     LiveRiskWidget, CategoryWidget, NeonPanel, MetricCard, DonutGauge, THEME,
-    TaskChecklistWidget, LiveAnalysisWidget, SystemLogWidget, ResultsCardWidget
+    TaskChecklistWidget, LiveAnalysisWidget, SystemLogWidget, ResultsCardWidget,
+    GeneratedPlanWidget
 )
 from zengine.ui.dialogs import SystemDetailsDialog, ThoughtTraceWidget
 
@@ -175,59 +176,89 @@ class MainWindow(QMainWindow):
         dashboard = QWidget()
         grid = QGridLayout(dashboard)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(6)
-        grid.setVerticalSpacing(6)
+        grid.setHorizontalSpacing(0)
+        grid.setVerticalSpacing(0)
 
         # LEFT TOP: system scan — compact (smaller than before)
         self.system_panel = NeonPanel("SYSTEM SCAN", accent=THEME["cyan"])
         self.system_panel.setMaximumHeight(198)
+        
+        sys_container = QWidget()
+        sys_layout = QVBoxLayout(sys_container)
+        sys_layout.setContentsMargins(0, 0, 0, 0)
+        sys_layout.setSpacing(12)
+        
         sys_grid = QGridLayout()
-        sys_grid.setHorizontalSpacing(12)
-        sys_grid.setVerticalSpacing(4)
+        sys_grid.setHorizontalSpacing(8)
+        sys_grid.setVerticalSpacing(2)
+        sys_grid.setContentsMargins(5, 5, 5, 5)
 
-        def _kv(r: int, c: int, k: str, v: str = "--"):
+
+        def _kv_stacked(r: int, c: int, k: str, v: str = "--"):
+            w = QWidget()
+            l = QVBoxLayout(w)
+            l.setContentsMargins(4, 4, 4, 4)
+            l.setSpacing(2)
             key = QLabel(k)
-            key.setStyleSheet(f"color: {THEME['muted']}; font-weight: 900; letter-spacing: 2px; font-size: 8px;")
+            key.setStyleSheet(f"color: {THEME['muted']}; font-weight: 900; letter-spacing: 1px; font-size: 8px;")
             val = QLabel(v)
             val.setStyleSheet(f"color: {THEME['text']}; font-weight: 900; font-size: 11px;")
-            sys_grid.addWidget(key, r, c * 2)
-            sys_grid.addWidget(val, r, c * 2 + 1)
+            l.addWidget(key)
+            l.addWidget(val)
+            w.setStyleSheet("background: rgba(12, 16, 26, 0.5); border: 1px solid rgba(120, 255, 255, 0.1); border-radius: 4px;")
+            sys_grid.addWidget(w, r, c)
             return val
+            
+        self.sys_os = _kv_stacked(0, 0, "OS", "--")
+        self.sys_host = _kv_stacked(0, 1, "HOSTNAME", "--")
+        self.sys_cpu = _kv_stacked(1, 0, "CPU CORES", "--")
+        self.sys_mem = _kv_stacked(1, 1, "RAM TOTAL", "--")
+        self.sys_uptime = _kv_stacked(2, 0, "UPTIME", "--")
+        self.sys_score = _kv_stacked(2, 1, "PROCESSES", "--")
+        
+        sys_layout.addLayout(sys_grid)
 
-        self.sys_os = _kv(0, 0, "OS", "WIN11 PRO")
-        self.sys_host = _kv(0, 1, "HOSTNAME", "NEXUS-7")
-        self.sys_cpu = _kv(1, 0, "CPU CORES", "16C/32T")
-        self.sys_mem = _kv(1, 1, "RAM TOTAL", "32 GB")
-        self.sys_uptime = _kv(2, 0, "UPTIME", "14D 06H")
-        self.sys_score = _kv(2, 1, "PROCESSES", "247")
-
-        self.run_scan_btn = QPushButton("[ RE-SCAN ]")
+        self.run_scan_btn = QPushButton("[ INITIALIZE SCAN ]")
+        self.run_scan_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(46, 243, 255, 0.05);
+                border: 1px solid {THEME['cyan']};
+                color: {THEME['cyan']};
+                font-weight: 900;
+                letter-spacing: 2px;
+                padding: 6px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background: rgba(46, 243, 255, 0.15);
+            }}
+        """)
         self.run_scan_btn.clicked.connect(self._scan)
-        sys_grid.addWidget(self.run_scan_btn, 3, 0, 1, 4)
+        sys_layout.addWidget(self.run_scan_btn)
 
-        self.system_panel.body_layout.addLayout(sys_grid)
+        self.system_panel.body_layout.addWidget(sys_container)
         grid.addWidget(self.system_panel, 0, 0)
 
-        # LEFT: optimization tasks — checklist only (no pipeline UI here)
+        # Row 1: Optimization tasks — spans 2 columns (0, 1)
         self.ops_panel = NeonPanel("OPTIMIZATION TASKS", accent=THEME["cyan"])
         self.task_list = TaskChecklistWidget()
+        self.task_list.clear_tasks()
         self.ops_panel.body_layout.addWidget(self.task_list, 1)
-        # Tasks occupy rows 1–2, left column (like screenshot)
-        grid.addWidget(self.ops_panel, 1, 0, 2, 1)
+        grid.addWidget(self.ops_panel, 1, 0, 1, 2)
 
-        # CENTER TOP: live analysis only (pipeline charts kept hidden)
+        # CENTER TOP: live analysis
         self.analysis_panel = NeonPanel("LIVE ANALYSIS", accent=THEME["green"])
         self.live_analysis = LiveAnalysisWidget()
         self.analysis_panel.body_layout.addWidget(self.live_analysis)
         grid.addWidget(self.analysis_panel, 0, 1)
 
-        # RIGHT TOP: risk matrix — donut + labels like screenshot
+        # RIGHT TOP: risk matrix
         self.risk_panel = NeonPanel("RISK MATRIX", accent=THEME["cyan"])
         risk_outer = QVBoxLayout()
         risk_outer.setContentsMargins(0, 0, 0, 0)
         risk_outer.setSpacing(8)
         risk_row = QHBoxLayout()
-        self.donut = DonutGauge("RISK", 28, accent=THEME["cyan"])
+        self.donut = DonutGauge("RISK", 0, accent=THEME["cyan"])
         self.donut.setMinimumHeight(120)
         self.donut.setMaximumHeight(140)
         risk_row.addWidget(self.donut, 1)
@@ -242,23 +273,23 @@ class MainWindow(QMainWindow):
             rgrid.addWidget(kk, row, 0)
             rgrid.addWidget(val, row, 1)
 
-        self.r_threat = QLabel("LOW")
+        self.r_threat = QLabel("--")
         self.r_threat.setStyleSheet(f"color: {THEME['green']}; font-weight: 900; font-size: 10px;")
         _rlab(0, "THREAT LVL", self.r_threat)
 
-        self.r_high_risk = QLabel("2")
+        self.r_high_risk = QLabel("--")
         self.r_high_risk.setStyleSheet(f"color: {THEME['yellow']}; font-weight: 900; font-size: 10px;")
         _rlab(1, "HIGH RISK", self.r_high_risk)
 
-        self.r_unsafe = QLabel("1")
+        self.r_unsafe = QLabel("--")
         self.r_unsafe.setStyleSheet(f"color: {THEME['yellow']}; font-weight: 900; font-size: 10px;")
         _rlab(2, "UNSAFE CMD", self.r_unsafe)
 
-        self.r_reboot = QLabel("NO")
+        self.r_reboot = QLabel("--")
         self.r_reboot.setStyleSheet(f"color: {THEME['magenta']}; font-weight: 900; font-size: 10px;")
         _rlab(3, "REBOOT REQ", self.r_reboot)
 
-        self.r_conf = QLabel("94%")
+        self.r_conf = QLabel("--")
         self.r_conf.setStyleSheet(f"color: {THEME['magenta']}; font-weight: 900; font-size: 10px;")
         _rlab(4, "CONFIDENCE", self.r_conf)
 
@@ -266,8 +297,8 @@ class MainWindow(QMainWindow):
         risk_outer.addLayout(risk_row)
 
         scores_row = QHBoxLayout()
-        self.r_score_now = QLabel("72")
-        self.r_proj = QLabel("91")
+        self.r_score_now = QLabel("--")
+        self.r_proj = QLabel("--")
         sn = QLabel("SCORE NOW:")
         sn.setStyleSheet(f"color: {THEME['muted']}; font-weight: 900; font-size: 8px;")
         pj = QLabel("PROJECTED:")
@@ -285,28 +316,33 @@ class MainWindow(QMainWindow):
         self.risk_panel.body_layout.addLayout(risk_outer)
         grid.addWidget(self.risk_panel, 0, 2)
 
-        # Middle row: center column empty, right = system log
-        mid_spacer = QWidget()
-        mid_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        grid.addWidget(mid_spacer, 1, 1)
-
+        # Row 1 (Right): System Log connects beside optimization tasks
         self.syslog_panel = NeonPanel("SYSTEM LOG", accent=THEME["magenta"])
         self.syslog = SystemLogWidget()
         self.syslog_panel.body_layout.addWidget(self.syslog, 1)
         grid.addWidget(self.syslog_panel, 1, 2)
 
-        # Bottom row: generated plan (center), results (right)
+        # Row 2: Generated plan (spans columns 0, 1)
         self.plan_panel = NeonPanel("GENERATED PLAN OUTPUT", accent=THEME["cyan"])
-        self.plan_text = QTextEdit()
-        self.plan_text.setReadOnly(True)
-        self.plan_panel.body_layout.addWidget(self.plan_text, 1)
-        grid.addWidget(self.plan_panel, 2, 1)
+        self.plan_list = GeneratedPlanWidget()
+        self.plan_panel.body_layout.addWidget(self.plan_list, 1)
+        grid.addWidget(self.plan_panel, 2, 0, 1, 2)
 
         self.results_panel = NeonPanel("RESULTS CARD", accent=THEME["cyan"])
         self.results = ResultsCardWidget()
         self.results.export.clicked.connect(self._export_script)
         self.results_panel.body_layout.addWidget(self.results)
         grid.addWidget(self.results_panel, 2, 2)
+
+        # Hide panel bodies initially to ensure strict empty boxes.
+        self._animated_early = [self.system_panel, self.analysis_panel, self.risk_panel]
+        # Syslog is explicitly omitted so text flow is visible at initialization
+        self._animated_late = [self.ops_panel, self.plan_panel, self.results_panel]
+        
+        for p in self._animated_early + self._animated_late:
+            eff = QGraphicsOpacityEffect(p.body)
+            eff.setOpacity(0.0)
+            p.body.setGraphicsEffect(eff)
 
         # Hidden pipeline widgets (logic still uses these)
         self._pipeline_host = QWidget()
@@ -353,13 +389,13 @@ class MainWindow(QMainWindow):
             c.setParent(self._pipeline_host)
             c.hide()
 
-        # Row/col stretch — screenshot: top row shorter, middle tall, bottom moderate
+        # Columns stretch normally to fill width
         grid.setColumnStretch(0, 34)
         grid.setColumnStretch(1, 38)
         grid.setColumnStretch(2, 28)
-        grid.setRowStretch(0, 24)
-        grid.setRowStretch(1, 46)
-        grid.setRowStretch(2, 30)
+        
+        # Squeeze everything to the top to eliminate vertical centering gaps
+        grid.setRowStretch(3, 1)
 
         content.addWidget(dashboard, 1)
         root.addLayout(content, 1)
@@ -401,23 +437,37 @@ class MainWindow(QMainWindow):
         steps_layout.setSpacing(6)
 
         self.step_badges = []
-        for i, name in enumerate(["SCAN", "ANALYZE", "PLAN", "REVIEW", "REFINE"]):
-            b = QLabel(f"{i+1}  {name}")
-            b.setObjectName("stepBadge")
-            b.setStyleSheet("""
-                QLabel {
-                    padding: 5px 8px;
-                    border-radius: 0px;
-                    border: 1px solid rgba(120,255,255,0.14);
-                    background: rgba(12,16,26,0.85);
-                    color: rgba(240,245,255,0.72);
-                    font-weight: 900;
-                    letter-spacing: 1px;
-                    font-size: 10px;
-                }
-            """)
-            self.step_badges.append(b)
-            steps_layout.addWidget(b)
+        self.step_lines = []
+        steps_list = ["SCAN", "ANALYZE", "PLAN", "REVIEW", "REFINE"]
+        for i, name in enumerate(steps_list):
+            # Step container
+            step_widget = QWidget()
+            sw_layout = QHBoxLayout(step_widget)
+            sw_layout.setContentsMargins(0, 0, 0, 0)
+            sw_layout.setSpacing(8)
+            
+            # The number badge
+            num_badge = QLabel(f"{i+1}")
+            num_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            num_badge.setFixedSize(20, 20)
+            
+            # The name label
+            name_label = QLabel(name)
+            
+            sw_layout.addWidget(num_badge)
+            sw_layout.addWidget(name_label)
+            
+            self.step_badges.append((step_widget, num_badge, name_label))
+            steps_layout.addWidget(step_widget)
+            
+            # Add connecting line if not the last step
+            if i < len(steps_list) - 1:
+                line = QFrame()
+                line.setFrameShape(QFrame.Shape.HLine)
+                line.setMinimumWidth(30)
+                line.setFixedHeight(1)
+                self.step_lines.append(line)
+                steps_layout.addWidget(line)
 
         hdr.addWidget(steps)
         
@@ -587,49 +637,71 @@ class MainWindow(QMainWindow):
         """)
 
     def _set_step_stage(self, stage: int):
-        # stage is 0..4, highlight current and previous like the screenshot nav.
         if not hasattr(self, "step_badges") or not self.step_badges:
             return
-        for i, b in enumerate(self.step_badges):
-            if i < stage:
-                b.setStyleSheet(f"""
-                    QLabel {{
-                        padding: 6px 10px;
-                        border-radius: 10px;
-                        border: 1px solid rgba(66,255,158,0.45);
-                        background: rgba(66,255,158,0.10);
-                        color: {THEME["green"]};
-                        font-weight: 900;
-                        letter-spacing: 1px;
-                        font-size: 10px;
-                    }}
+        
+        # Colors based on plan
+        active_magenta = THEME["magenta"]
+        active_bg = "rgba(177, 91, 255, 0.15)"
+        dim_cyan = "rgba(46, 243, 255, 0.3)"
+        dim_text = "rgba(240, 248, 255, 0.5)"
+        
+        for i, (widget, num_badge, name_label) in enumerate(self.step_badges):
+            if i == stage:
+                # Active step: Magenta sharp square border around number, bold naming
+                widget.setStyleSheet(f"background: transparent;")
+                num_badge.setStyleSheet(f"""
+                    background: {active_magenta};
+                    color: #000000;
+                    font-weight: 900;
+                    font-size: 10px;
+                    border-radius: 0px;
                 """)
-            elif i == stage:
-                b.setStyleSheet(f"""
-                    QLabel {{
-                        padding: 6px 10px;
-                        border-radius: 10px;
-                        border: 1px solid rgba(46,243,255,0.65);
-                        background: rgba(46,243,255,0.10);
-                        color: {THEME["cyan"]};
-                        font-weight: 900;
-                        letter-spacing: 1px;
-                        font-size: 10px;
-                    }}
+                name_label.setStyleSheet(f"""
+                    color: {active_magenta};
+                    font-weight: 900;
+                    letter-spacing: 1px;
+                    font-size: 10px;
+                """)
+            elif i < stage:
+                # Completed step: Cyan (dimmed)
+                widget.setStyleSheet(f"background: transparent;")
+                num_badge.setStyleSheet(f"""
+                    background: {dim_cyan};
+                    color: #000000;
+                    font-weight: 900;
+                    font-size: 10px;
+                    border-radius: 0px;
+                """)
+                name_label.setStyleSheet(f"""
+                    color: {THEME["cyan"]};
+                    font-weight: 900;
+                    letter-spacing: 1px;
+                    font-size: 10px;
                 """)
             else:
-                b.setStyleSheet("""
-                    QLabel {
-                        padding: 6px 10px;
-                        border-radius: 10px;
-                        border: 1px solid rgba(120,255,255,0.14);
-                        background: rgba(12,16,26,0.85);
-                        color: rgba(240,245,255,0.72);
-                        font-weight: 900;
-                        letter-spacing: 1px;
-                        font-size: 10px;
-                    }
+                # Future step
+                widget.setStyleSheet(f"background: transparent;")
+                num_badge.setStyleSheet(f"""
+                    background: rgba(12, 16, 26, 0.85);
+                    border: 1px solid rgba(120, 255, 255, 0.2);
+                    color: {dim_text};
+                    font-weight: 900;
+                    font-size: 10px;
+                    border-radius: 0px;
                 """)
+                name_label.setStyleSheet(f"""
+                    color: {dim_text};
+                    font-weight: 900;
+                    letter-spacing: 1px;
+                    font-size: 10px;
+                """)
+                
+        for i, line in enumerate(self.step_lines):
+            if i < stage:
+                line.setStyleSheet(f"background-color: {THEME['cyan']};")
+            else:
+                line.setStyleSheet("background-color: rgba(120, 255, 255, 0.2);")
     
     def _create_buttons(self):
         buttons_widget = QWidget()
@@ -749,6 +821,13 @@ class MainWindow(QMainWindow):
         self.details_btn.setEnabled(False)
         self.set_api_status("unknown")
         
+        # Hide all containers immediately
+        for panel in self._animated_early + self._animated_late:
+            if hasattr(panel, 'body'):
+                eff = panel.body.graphicsEffect()
+                if eff:
+                    eff.setOpacity(0.0)
+        
         self._cleanup_workers()
         self._clear_all_categories()
         self.flow_indicator.set_stage(0)
@@ -779,6 +858,19 @@ class MainWindow(QMainWindow):
         self.set_api_status("online")
         self.flow_indicator.set_stage(1)
         self._set_step_stage(1)
+        
+        # Visual top-to-bottom flow: Reveal Phase 1 (Top Scan Panels)
+        self._animations_1 = []
+        for i, panel in enumerate(self._animated_early):
+            eff = panel.body.graphicsEffect()
+            anim = QPropertyAnimation(eff, b"opacity")
+            anim.setDuration(500)
+            anim.setStartValue(eff.opacity())
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            QTimer.singleShot(i * 150, anim.start)
+            self._animations_1.append(anim)
+            
         self.chart_stack.setCurrentWidget(self.clean_view)
         
         self.scan_worker = None
@@ -890,7 +982,9 @@ class MainWindow(QMainWindow):
         
         self.plan_worker = None
         self._display_original_plan()
-        self._get_plan_critique()
+        
+        self.log_msg("Ready for Simulate Strategies.")
+        self.simulate_btn.setEnabled(True)
 
         if self.metrics and self.metrics.overall_score is not None and projected is not None:
             gain = projected - self.metrics.overall_score
@@ -907,18 +1001,29 @@ class MainWindow(QMainWindow):
             selected = []
             for cat in self.original_categories:
                 selected.extend(cat.tasks[:2])
+            
+            # Feed tasks to our checklist
+            self.task_list.set_tasks([t for cat in self.original_categories for t in cat.tasks])
+            
             self.script_preview.update_script(selected)
 
-            # Render plan output text block
-            lines = []
-            for cat in self.original_categories:
-                lines.append(f"[{cat.name}]")
-                for t in cat.tasks[:6]:
-                    lines.append(f"- {t.description}")
-                lines.append("")
-            self.plan_text.setPlainText("\n".join(lines).strip())
-        except Exception:
-            pass
+            # Render plan output using custom layout component
+            self.plan_list.set_plan(self.original_categories)
+        except Exception as e:
+            self.log_msg(f"Could not format plan string: {e}", "WARN")
+            
+        # Flow from top-to-bottom Phase 2 (Tasks, Plan) MUST always trigger regardless of parsing failure
+        self._animations_2 = []
+        for i, panel in enumerate(self._animated_late):
+            eff = panel.body.graphicsEffect()
+            if eff and eff.opacity() < 1.0:
+                anim = QPropertyAnimation(eff, b"opacity")
+                anim.setDuration(500)
+                anim.setStartValue(eff.opacity())
+                anim.setEndValue(1.0)
+                anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                QTimer.singleShot(i * 150, anim.start)
+                self._animations_2.append(anim)
     
     def _display_original_plan(self):
         self._clear_tab_layout(self.original_tab_layout)
@@ -1005,10 +1110,22 @@ class MainWindow(QMainWindow):
             self.refined_projected = projected or (self.original_projected - 2)
             self.risk_reduction = risk_reduction or 20.0
             self.improvements = improvements or ["Optimized for safety"]
+            
+        # Update scroll bar tasks with refined targets
+        try:
+            self.task_list.set_tasks([t for cat in self.refined_categories for t in cat.tasks])
+        except Exception:
+            pass
         
         gain = 0
         if self.metrics and self.metrics.overall_score is not None and self.refined_projected is not None:
             gain = self.refined_projected - self.metrics.overall_score
+            
+        try:
+            # Render refined plan output using custom layout component
+            self.plan_list.set_plan(self.refined_categories)
+        except Exception as e:
+            self.log_msg(f"Could not format refined plan string: {e}", "WARN")
         
         self.log_msg(f"Refined strategy ready: +{gain} gain, -{self.risk_reduction:.0f}% risk")
         self.flow_indicator.set_stage(4)
