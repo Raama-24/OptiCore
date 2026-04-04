@@ -7,7 +7,7 @@ import os
 import threading
 from typing import List, Optional
 from zengine.safety import CommandSafety
-from zengine.script import ScriptGenerator, LiveRiskCalculator
+from zengine.script import ScriptGenerator, LiveRiskCalculator, ScriptRunner
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QLabel, QPushButton, QGroupBox, QGridLayout, QTabWidget, QScrollArea,
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QMenuBar, QMenu, QProgressBar, QFrame, QSizePolicy, QGraphicsOpacityEffect
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont, QAction
+from PySide6.QtGui import QFont, QAction, QTextCursor
 
 from zengine.config import ASI_API_KEY
 from zengine.analyzer import PureAIAnalyzer
@@ -275,13 +275,72 @@ class MainWindow(QMainWindow):
         self.plan_list = GeneratedPlanWidget()
         self.plan_list.selection_changed.connect(self._selection_changed)
         self.plan_panel.body_layout.addWidget(self.plan_list, 1)
-        grid.addWidget(self.plan_panel, 1, 0, 2, 2)
+        grid.addWidget(self.plan_panel, 1, 0) # Removed span, occupying row 1, col 0
+
+        # POWERSHELL SCRIPT PANEL (Under Generated Plan)
+        self.script_panel = NeonPanel("POWERSHELL SCRIPT", accent=THEME["cyan"])
+        
+        # Add buttons to script panel header
+        self.script_export_btn = QPushButton("EXPORT")
+        self.script_export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.script_export_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(46, 243, 255, 0.1);
+                border: 1px solid {THEME['cyan']};
+                color: {THEME['cyan']};
+                font-weight: 900;
+                font-size: 9px;
+                padding: 2px 8px;
+                min-height: 16px;
+            }}
+            QPushButton:hover {{ background: rgba(46, 243, 255, 0.2); }}
+        """)
+        self.script_export_btn.clicked.connect(self._save_dashboard_script)
+        self.script_panel._title_row.layout().addWidget(self.script_export_btn)
+
+        self.script_run_btn = QPushButton("RUN")
+        self.script_run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.script_run_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(177, 91, 255, 0.15);
+                border: 1px solid {THEME['magenta']};
+                color: {THEME['magenta']};
+                font-weight: 900;
+                font-size: 9px;
+                padding: 2px 10px;
+                min-height: 16px;
+            }}
+            QPushButton:hover {{ background: rgba(177, 91, 255, 0.25); }}
+        """)
+        self.script_run_btn.clicked.connect(self._run_dashboard_script)
+        self.script_panel._title_row.layout().addWidget(self.script_run_btn)
+
+        self.script_edit = QTextEdit()
+        self.script_edit.setReadOnly(True)
+        self.script_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.script_edit.setPlaceholderText("# PowerShell script will be generated here upon task selection...")
+        self.script_edit.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: rgba(7, 10, 16, 0.4);
+                border: 1px solid rgba(120, 255, 255, 0.05);
+                color: #FFFFFF;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 10px;
+                padding: 5px;
+            }}
+        """)
+        self.script_panel.body_layout.addWidget(self.script_edit)
+        grid.addWidget(self.script_panel, 2, 0)
 
         # CENTER TOP: live analysis
         self.analysis_panel = NeonPanel("LIVE ANALYSIS", accent=THEME["green"])
         self.live_analysis = LiveAnalysisWidget()
         self.analysis_panel.body_layout.addWidget(self.live_analysis)
         grid.addWidget(self.analysis_panel, 0, 1)
+        
+        # Adjusting col spans of center/right to match updated col 0
+        grid.addWidget(self.script_panel, 2, 0, 1, 2) # Now spanning col 0 and 1
+        grid.addWidget(self.plan_panel, 1, 0, 1, 2) # Now spanning col 0 and 1
 
         # RIGHT TOP: risk matrix
         self.risk_panel = NeonPanel("RISK MATRIX", accent=THEME["cyan"])
@@ -364,7 +423,7 @@ class MainWindow(QMainWindow):
         # Hide panel bodies initially to ensure strict empty boxes.
         self._animated_early = [self.system_panel, self.analysis_panel, self.risk_panel]
         # Syslog is explicitly omitted so text flow is visible at initialization
-        self._animated_late = [self.plan_panel, self.results_panel]
+        self._animated_late = [self.plan_panel, self.results_panel, self.script_panel]
         
         for p in self._animated_early + self._animated_late:
             eff = QGraphicsOpacityEffect(p.body)
@@ -861,7 +920,7 @@ class MainWindow(QMainWindow):
         self._set_step_stage(0)
         self.analyzer.client.start_pipeline()
         
-        self.scan_worker = ScanWorker()
+        self.scan_worker = ScanWorker(repeat=False) # FIX: No log spam
         self.scan_worker.finished.connect(self._scan_done)
         self.scan_worker.start()
     
@@ -1325,11 +1384,13 @@ class MainWindow(QMainWindow):
                 self.r_proj.setText(str(risk_data["projected_score"]))
             
             self.script_preview.update_script(selected)
+            self._update_script_box(selected) # Dashboard box
             self.toolbox.setCurrentIndex(2)
         else:
             self.status.setText("No tasks selected")
             self.live_risk.hide()
             self.script_preview.update_script([])
+            self._update_script_box([]) # Clear dashboard box
             
             # Reset Risk Matrix to baseline
             if self.metrics:
@@ -1480,6 +1541,49 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Success", f"Script saved to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save script: {e}")
+
+    def _run_script(self):
+        if not self.current_script_path or not os.path.exists(self.current_script_path):
+            QMessageBox.critical(self, "Error", "No script available to run. Please generate a script first.")
+            return
+        
+        ScriptRunner.run_script(self.current_script_path, self)
+
+    def _update_script_box(self, tasks: List[OptimizationTask]):
+        if not tasks:
+            self.script_edit.clear()
+            return
+            
+        safe_mode = True # Default for dashboard
+        if hasattr(self, "script_preview"):
+            safe_mode = self.script_preview.safe_mode_cb.isChecked()
+            
+        script = ScriptGenerator.generate_script(tasks, safe_mode)
+        self.script_edit.setPlainText(script)
+        
+        # Scroll to bottom
+        self.script_edit.moveCursor(QTextCursor.MoveOperation.End)
+
+    def _save_dashboard_script(self):
+        selected = self._get_selected()
+        if not selected:
+            QMessageBox.information(self, "No Selection", "Select tasks first")
+            return
+        self._export_script() # Reuse existing export logic
+
+    def _run_dashboard_script(self):
+        selected = self._get_selected()
+        if not selected:
+            QMessageBox.information(self, "No Selection", "Select tasks first")
+            return
+            
+        script_content = self.script_edit.toPlainText()
+        if not script_content:
+            return
+            
+        temp_path = ScriptRunner.create_temp_script(script_content)
+        if temp_path:
+            ScriptRunner.run_script(temp_path, self)
     
     def _create_restore_point(self):
         self.log_msg("Creating system restore point...")

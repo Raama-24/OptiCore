@@ -29,10 +29,17 @@ class BaseWorker(QThread):
 class ScanWorker(BaseWorker):
     finished = Signal(object)
     
-    def __init__(self):
+    def __init__(self, repeat: bool = True):
         super().__init__()
+        self.repeat = repeat
     
     def run(self):
+        if not self.repeat:
+            snapshot = system_scanner(interval=0.1)
+            if self.is_running():
+                self.finished.emit(snapshot)
+            return
+
         while self.is_running():
             # Use 0.1s interval as requested for real-time without UI lag
             snapshot = system_scanner(interval=0.1)

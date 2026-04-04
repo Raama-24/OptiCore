@@ -365,9 +365,8 @@ class ScriptRunner:
             subprocess.Popen([
                 "powershell.exe",
                 "-NoProfile",
-                "-ExecutionPolicy", "Bypass",
                 "-Command",
-                f'Start-Process powershell.exe -Verb RunAs -ArgumentList \'-NoProfile -ExecutionPolicy Bypass -NoExit -File "{script_path}"\''
+                f'Start-Process powershell.exe -Verb RunAs -ArgumentList \'-NoProfile -ExecutionPolicy Bypass -NoExit -File "{ScriptRunner._escape_path_for_powershell(script_path)}"\''
             ])
             QMessageBox.information(
                 parent_widget,

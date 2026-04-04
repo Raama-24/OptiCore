@@ -18,6 +18,8 @@ from zengine.models import OptimizationTask, OptimizationCategory, StrategyOptio
 from zengine.safety import CommandSafety, RiskLevel
 from zengine.script import ScriptGenerator, ScriptRunner, LiveRiskCalculator
 
+# Absolute path for Qt stylesheet to render safely
+TICK_SVG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "zengine", "ui", "tick.svg").replace("\\", "/")
 
 THEME = {
     # Tuned to the reference screenshot (dark, subtle borders, neon accents).
@@ -222,23 +224,23 @@ class PlanCardWrapper(QWidget):
         self.outer_layout.setSpacing(8)
 
         self.cb = QCheckBox()
-        self.cb.setStyleSheet("""
-            QCheckBox::indicator {
+        self.cb.setStyleSheet(f"""
+            QCheckBox::indicator {{
                 width: 14px;
                 height: 14px;
                 background: rgba(12, 16, 26, 0.7);
                 border: 1px solid rgba(46, 243, 255, 0.4);
                 border-radius: 2px;
-            }
-            QCheckBox::indicator:hover {
+            }}
+            QCheckBox::indicator:hover {{
                 border: 1px solid rgba(46, 243, 255, 0.8);
                 background: rgba(46, 243, 255, 0.1);
-            }
-            QCheckBox::indicator:checked {
+            }}
+            QCheckBox::indicator:checked {{
                 background: rgba(46, 243, 255, 0.3);
                 border: 1px solid #2bf2ff;
-                image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%232bf2ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>');
-            }
+                image: url("{TICK_SVG_PATH}");
+            }}
         """)
         self.cb.stateChanged.connect(self._on_toggle)
         self.outer_layout.addWidget(self.cb)
@@ -427,7 +429,7 @@ class GeneratedPlanWidget(QScrollArea):
             anim_group.addAnimation(pos_anim)
             
             # Staggered by 120ms for faderow
-            QTimer.singleShot(i * 120, anim_group.start)
+            QTimer.singleShot(i * 150, anim_group.start)
             self._animations.append(anim_group)
             
             self.layout.addWidget(row)
