@@ -21,7 +21,7 @@ def check_internet_connection(timeout=3):
         socket.setdefaulttimeout(None)
 
 
-def system_scanner() -> Dict[str, Any]:
+def system_scanner(interval: float = None) -> Dict[str, Any]:
     snapshot = {
         "timestamp": datetime.datetime.now().isoformat(),
         "error": None,
@@ -55,7 +55,7 @@ def system_scanner() -> Dict[str, Any]:
             "name": platform.processor(),
             "cores_physical": psutil.cpu_count(logical=False) or 0,
             "cores_logical": psutil.cpu_count(logical=True) or 0,
-            "usage_percent": round(psutil.cpu_percent(interval=1), 1),
+            "usage_percent": round(psutil.cpu_percent(interval=interval), 1),
             "frequency_mhz": round(cpu_freq.current, 0) if cpu_freq else 0,
             "max_frequency_mhz": round(cpu_freq.max, 0) if cpu_freq else 0
         }
@@ -102,13 +102,27 @@ def system_scanner() -> Dict[str, Any]:
         snapshot["processes"] = processes
         
         try:
-            result = subprocess.run(['powercfg', '/getactivescheme'], 
-                                   capture_output=True, text=True, timeout=2)
-            match = re.search(r'\((.*?)\)', result.stdout)
-            snapshot["power_plan"] = {"name": match.group(1) if match else "Balanced"}
+            disk_io = psutil.disk_io_counters()
+            snapshot["storage_io"] = {
+                "read_bytes": disk_io.read_bytes if disk_io else 0,
+                "write_bytes": disk_io.write_bytes if disk_io else 0,
+                "read_count": disk_io.read_count if disk_io else 0,
+                "write_count": disk_io.write_count if disk_io else 0
+            }
         except:
-            snapshot["power_plan"] = {"name": "Unknown"}
-        
+            snapshot["storage_io"] = {}
+
+        try:
+            net_io = psutil.net_io_counters()
+            snapshot["network_io"] = {
+                "bytes_sent": net_io.bytes_sent if net_io else 0,
+                "bytes_recv": net_io.bytes_recv if net_io else 0,
+                "packets_sent": net_io.packets_sent if net_io else 0,
+                "packets_recv": net_io.packets_recv if net_io else 0
+            }
+        except:
+            snapshot["network_io"] = {}
+            
     except Exception as e:
         snapshot["error"] = str(e)
     

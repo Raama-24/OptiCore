@@ -69,11 +69,19 @@ class MainWindow(QMainWindow):
         self.regenerate_worker = None
         self.simulation_worker = None
         self.confidence_worker = None
+        self.refresh_worker = None
         
         self.setWindowTitle("Z-Engine: Generates, Engineers and Deploys")
         self.setGeometry(100, 100, 1400, 900)
         self.setup_ui()
         self.setup_menu()
+
+        # Persistent background scanner (Refined Plan)
+        self.refresh_worker = ScanWorker()
+        self.refresh_worker.finished.connect(self._on_refresh_done)
+        self.refresh_worker.start()
+        
+        self.prev_snapshot = None
     
     def _stop_worker(self, worker):
         """Stop a worker if it's running"""
@@ -91,6 +99,7 @@ class MainWindow(QMainWindow):
         self._stop_worker(self.regenerate_worker)
         self._stop_worker(self.simulation_worker)
         self._stop_worker(self.confidence_worker)
+        self._stop_worker(self.refresh_worker)
     
     def setup_menu(self):
         menubar = self.menuBar()
@@ -239,12 +248,34 @@ class MainWindow(QMainWindow):
         self.system_panel.body_layout.addWidget(sys_container)
         grid.addWidget(self.system_panel, 0, 0)
 
-        # Row 1: Optimization tasks — spans 2 columns (0, 1)
-        self.ops_panel = NeonPanel("OPTIMIZATION TASKS", accent=THEME["cyan"])
-        self.task_list = TaskChecklistWidget()
-        self.task_list.clear_tasks()
-        self.ops_panel.body_layout.addWidget(self.task_list, 1)
-        grid.addWidget(self.ops_panel, 1, 0, 1, 2)
+        # Row 1 and 2: Generated Plan (spans 2 columns, goes down 2 rows)
+        self.plan_panel = NeonPanel("GENERATED PLAN", accent=THEME["cyan"])
+        
+        self.refined_btn = QPushButton("REFINED PLAN")
+        self.refined_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refined_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(46, 243, 255, 0.1);
+                border: 1px solid {THEME['cyan']};
+                color: {THEME['cyan']};
+                font-weight: 900;
+                font-size: 10px;
+                padding: 4px 10px;
+                border-radius: 2px;
+                min-height: 16px;
+            }}
+            QPushButton:hover {{
+                background: rgba(46, 243, 255, 0.2);
+            }}
+        """)
+        self.refined_btn.clicked.connect(self._show_refined_plan_in_list)
+        self.refined_btn.hide()
+        self.plan_panel._title_row.layout().addWidget(self.refined_btn)
+        
+        self.plan_list = GeneratedPlanWidget()
+        self.plan_list.selection_changed.connect(self._selection_changed)
+        self.plan_panel.body_layout.addWidget(self.plan_list, 1)
+        grid.addWidget(self.plan_panel, 1, 0, 2, 2)
 
         # CENTER TOP: live analysis
         self.analysis_panel = NeonPanel("LIVE ANALYSIS", accent=THEME["green"])
@@ -322,11 +353,7 @@ class MainWindow(QMainWindow):
         self.syslog_panel.body_layout.addWidget(self.syslog, 1)
         grid.addWidget(self.syslog_panel, 1, 2)
 
-        # Row 2: Generated plan (spans columns 0, 1)
-        self.plan_panel = NeonPanel("GENERATED PLAN OUTPUT", accent=THEME["cyan"])
-        self.plan_list = GeneratedPlanWidget()
-        self.plan_panel.body_layout.addWidget(self.plan_list, 1)
-        grid.addWidget(self.plan_panel, 2, 0, 1, 2)
+        # Row 2 previously had generated plan. Now it's merged into row 1 span.
 
         self.results_panel = NeonPanel("RESULTS CARD", accent=THEME["cyan"])
         self.results = ResultsCardWidget()
@@ -337,7 +364,7 @@ class MainWindow(QMainWindow):
         # Hide panel bodies initially to ensure strict empty boxes.
         self._animated_early = [self.system_panel, self.analysis_panel, self.risk_panel]
         # Syslog is explicitly omitted so text flow is visible at initialization
-        self._animated_late = [self.ops_panel, self.plan_panel, self.results_panel]
+        self._animated_late = [self.plan_panel, self.results_panel]
         
         for p in self._animated_early + self._animated_late:
             eff = QGraphicsOpacityEffect(p.body)
@@ -904,12 +931,27 @@ class MainWindow(QMainWindow):
 
         # Drive center analysis + results values
         try:
+            # Use real data from snapshot if available, fallback only if missing
+            current_cpu = self.snapshot.get("cpu", {}).get("usage_percent", 24)
+            current_mem = self.snapshot.get("memory", {}).get("usage_percent", 61)
+            
+            # Simple scaling for Disk/Net load if not calculated yet
+            disk_io = self.snapshot.get("storage_io", {}).get("read_count", 18) % 100
+            net_load = self.snapshot.get("network_io", {}).get("packets_recv", 27) % 100
+
             self.live_analysis.set_metrics(
-                cpu=24, mem=61, disk_io=18, net=27, stability=min(100, max(0, metrics.overall_score))
+                cpu=current_cpu, 
+                mem=current_mem, 
+                disk_io=disk_io, 
+                net=net_load, 
+                stability=min(100, max(0, metrics.overall_score))
             )
             self.results.before.setText(str(metrics.overall_score))
             if hasattr(self, "r_score_now"):
                 self.r_score_now.setText(str(metrics.overall_score))
+            
+            # Start live refresh
+            self.refresh_timer.start()
         except Exception:
             pass
         
@@ -1002,9 +1044,6 @@ class MainWindow(QMainWindow):
             for cat in self.original_categories:
                 selected.extend(cat.tasks[:2])
             
-            # Feed tasks to our checklist
-            self.task_list.set_tasks([t for cat in self.original_categories for t in cat.tasks])
-            
             self.script_preview.update_script(selected)
 
             # Render plan output using custom layout component
@@ -1024,6 +1063,9 @@ class MainWindow(QMainWindow):
                 anim.setEasingCurve(QEasingCurve.Type.OutCubic)
                 QTimer.singleShot(i * 150, anim.start)
                 self._animations_2.append(anim)
+                
+        # Continue pipeline to generate the refined plan automatically
+        self._get_plan_critique()
     
     def _display_original_plan(self):
         self._clear_tab_layout(self.original_tab_layout)
@@ -1092,40 +1134,47 @@ class MainWindow(QMainWindow):
     
     def _regenerate_done(self, categories, projected, risk_reduction, improvements):
         if not categories:
-            self.log_msg("Using refined version of original plan", "WARN")
+            self.log_msg("Filtering original plan for maximum safety...", "WARN")
+            # Strict safety filter: Only LOW risk tasks, limited to 2 per category
             categories = []
-            for cat in self.original_categories[:4]:
-                new_cat = cat.copy()
-                for task in new_cat.tasks:
-                    task.description = f"[SAFE] {task.description}"
-                    task.risk = RiskLevel.LOW
-                    task.is_safe = True
-                categories.append(new_cat)
+            for cat in self.original_categories:
+                safe_tasks = [t for t in cat.tasks if t.risk == RiskLevel.LOW]
+                if safe_tasks:
+                    new_cat = cat.copy()
+                    new_cat.tasks = safe_tasks[:2]
+                    for t in new_cat.tasks:
+                        t.description = f"[SAFE] {t.description}"
+                        t.is_safe = True
+                    categories.append(new_cat)
             self.refined_categories = categories
-            self.refined_projected = max(self.metrics.overall_score + 5, (self.original_projected or 80) - 3)
-            self.risk_reduction = 20.0
-            self.improvements = ["Added safety checks", "Reduced impact"]
+            self.refined_projected = max(self.metrics.overall_score + 3, (self.original_projected or 80) - 5)
+            self.risk_reduction = 45.0
+            self.improvements = ["Strict risk filtering", "Stability-first tuning"]
         else:
-            self.refined_categories = categories
-            self.refined_projected = projected or (self.original_projected - 2)
-            self.risk_reduction = risk_reduction or 20.0
-            self.improvements = improvements or ["Optimized for safety"]
+            # API returned a plan, but we still apply a safety filter to be sure
+            filtered_categories = []
+            for cat in categories:
+                # Filter: Must be marked safe AND not be High/Critical risk
+                safe_tasks = [t for t in cat.tasks if t.is_safe and t.risk not in [RiskLevel.HIGH, RiskLevel.CRITICAL]]
+                if safe_tasks:
+                    cat.tasks = safe_tasks
+                    filtered_categories.append(cat)
             
-        # Update scroll bar tasks with refined targets
-        try:
-            self.task_list.set_tasks([t for cat in self.refined_categories for t in cat.tasks])
-        except Exception:
-            pass
-        
+            self.refined_categories = filtered_categories
+            self.refined_projected = projected or (self.original_projected - 2)
+            self.risk_reduction = risk_reduction or 30.0
+            self.improvements = improvements or ["AI-refined safety path"]
+            
         gain = 0
         if self.metrics and self.metrics.overall_score is not None and self.refined_projected is not None:
             gain = self.refined_projected - self.metrics.overall_score
             
         try:
-            # Render refined plan output using custom layout component
-            self.plan_list.set_plan(self.refined_categories)
+            self.refined_btn.show()
+            if self.plan_panel.title_label.text() != "REFINED PLAN":
+                self._show_refined_plan_in_list()
         except Exception as e:
-            self.log_msg(f"Could not format refined plan string: {e}", "WARN")
+            self.log_msg(f"Could not display refined plan: {e}", "WARN")
         
         self.log_msg(f"Refined strategy ready: +{gain} gain, -{self.risk_reduction:.0f}% risk")
         self.flow_indicator.set_stage(4)
@@ -1262,6 +1311,18 @@ class MainWindow(QMainWindow):
                     refined_projected=self.refined_projected,
                     live_projected=risk_data["projected_score"]
                 )
+                
+                # Update visible Risk Matrix
+                self.donut.set_value(risk_data["total_risk"], legend=risk_data["risk_level"])
+                self.r_threat.setText(risk_data["risk_level"].upper())
+                self.r_high_risk.setText(str(risk_data["high_risk_tasks"]))
+                self.r_unsafe.setText(str(risk_data["unsafe_commands"]))
+                self.r_reboot.setText("YES" if risk_data["reboot_required"] else "NO")
+                self.r_conf.setText(f"{int(risk_data['confidence'])}%")
+                
+                # Dynamic mapping: Base Score + Current Impact
+                self.r_score_now.setText(str(self.metrics.overall_score))
+                self.r_proj.setText(str(risk_data["projected_score"]))
             
             self.script_preview.update_script(selected)
             self.toolbox.setCurrentIndex(2)
@@ -1269,6 +1330,18 @@ class MainWindow(QMainWindow):
             self.status.setText("No tasks selected")
             self.live_risk.hide()
             self.script_preview.update_script([])
+            
+            # Reset Risk Matrix to baseline
+            if self.metrics:
+                self.donut.set_value(0, legend="NONE")
+                self.r_threat.setText("NONE")
+                self.r_high_risk.setText("0")
+                self.r_unsafe.setText("0")
+                self.r_reboot.setText("NO")
+                self.r_conf.setText("--")
+                self.r_score_now.setText(str(self.metrics.overall_score))
+                self.r_proj.setText(str(self.metrics.overall_score))
+            
             self.chart.update_scores(
                 self.metrics.overall_score,
                 original_projected=self.original_projected,
@@ -1320,38 +1393,26 @@ class MainWindow(QMainWindow):
             self.sys_score.setText(str(proc_count))
     
     def _get_selected(self) -> List[OptimizationTask]:
-        selected = []
-        current_tab = self.category_tabs.currentIndex()
-        
         try:
-            if current_tab == 0:
-                for i in range(self.original_tab_layout.count()):
-                    item = self.original_tab_layout.itemAt(i)
-                    if item and item.widget():
-                        scroll = item.widget()
-                        if isinstance(scroll, QScrollArea):
-                            container = scroll.widget()
-                            if container and container.layout():
-                                for j in range(container.layout().count()):
-                                    w = container.layout().itemAt(j).widget()
-                                    if isinstance(w, CategoryWidget):
-                                        selected.extend(w.get_selected())
-            else:
-                for i in range(self.refined_tab_layout.count()):
-                    item = self.refined_tab_layout.itemAt(i)
-                    if item and item.widget():
-                        scroll = item.widget()
-                        if isinstance(scroll, QScrollArea):
-                            container = scroll.widget()
-                            if container and container.layout():
-                                for j in range(container.layout().count()):
-                                    w = container.layout().itemAt(j).widget()
-                                    if isinstance(w, CategoryWidget):
-                                        selected.extend(w.get_selected())
+            return self.plan_list.get_selected()
         except Exception as e:
             self.log_msg(f"Error getting selected tasks: {e}", "ERROR")
-        
-        return selected
+            return []
+            
+    def _show_refined_plan_in_list(self):
+        if hasattr(self, "plan_panel") and self.plan_panel:
+            if "REFINED PLAN" not in self.plan_panel.title_label.text():
+                if self.refined_categories:
+                    self.plan_list.set_plan(self.refined_categories, is_refined=True)
+                    self.plan_panel.title_label.setText("REFINED PLAN")
+                    self.refined_btn.setText("ORIGINAL PLAN")
+                    self._selection_changed()
+            else:
+                if self.original_categories:
+                    self.plan_list.set_plan(self.original_categories, is_refined=False)
+                    self.plan_panel.title_label.setText("GENERATED PLAN")
+                    self.refined_btn.setText("REFINED PLAN")
+                    self._selection_changed()
     
     def _simulate_strategies(self):
         if not self.snapshot or not self.metrics:
@@ -1468,6 +1529,38 @@ class MainWindow(QMainWindow):
                 self.log_msg("Failed to restore system", "ERROR")
                 QMessageBox.warning(self, "Warning", "Failed to restore system")
     
+    def _on_refresh_tick(self):
+        """Deprecated: The ScanWorker now runs persistently in the background."""
+        pass
+
+    def _on_refresh_done(self, new_snapshot):
+        """Update metrics from the background scan result"""
+        if not new_snapshot:
+            return
+            
+        try:
+            if not new_snapshot.get("error"):
+                self.snapshot = new_snapshot
+                self._update_system_summary(self.snapshot)
+                
+                cpu = self.snapshot.get("cpu", {}).get("usage_percent", 0)
+                mem = self.snapshot.get("memory", {}).get("usage_percent", 0)
+                
+                # For Disk/Net bars using real I/O metrics
+                io = self.snapshot.get("storage_io", {})
+                net_io = self.snapshot.get("network_io", {})
+                
+                # Drive bars using scaled real counters
+                disk = (io.get("write_count", 0) + io.get("read_count", 0)) % 100
+                net = (net_io.get("packets_sent", 0) + net_io.get("packets_recv", 0)) % 100
+                
+                # Stability remains what the AI scored
+                stab = self.metrics.overall_score if self.metrics else 50
+                
+                self.live_analysis.set_metrics(cpu, mem, disk, net, stab)
+        except Exception:
+            pass
+
     def closeEvent(self, event):
         """Clean up workers on close"""
         self._cleanup_workers()

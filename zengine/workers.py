@@ -3,6 +3,7 @@ Worker threads for background operations
 """
 
 import threading
+import time
 from PySide6.QtCore import QThread, Signal
 
 from zengine.scanner import system_scanner
@@ -32,9 +33,13 @@ class ScanWorker(BaseWorker):
         super().__init__()
     
     def run(self):
-        snapshot = system_scanner()
-        if self.is_running():
-            self.finished.emit(snapshot)
+        while self.is_running():
+            # Use 0.1s interval as requested for real-time without UI lag
+            snapshot = system_scanner(interval=0.1)
+            if self.is_running():
+                self.finished.emit(snapshot)
+            # Sleep briefly to avoid slamming the CPU between scans
+            time.sleep(1.0) # Aiming for ~1 update per second now that wait is in thread
 
 
 class AnalyzeWorker(BaseWorker):
