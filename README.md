@@ -135,6 +135,3 @@ This multi-pass architecture demonstrates how AI can function as an
 autonomous decision system — not a chatbot, but an engine.
 
 ========================|
-
-
-          ||  Dipanjan Dutta, 16, India ||
