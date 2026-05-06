@@ -1,6 +1,5 @@
-============|
 
-Z-Engine
+OptiCore
 
 ============|
 
@@ -126,7 +125,7 @@ Agentic AI Architecture
 
 ===========================|
 
-Z-Engine implements an agentic reasoning loop where the AI does not simply
+OptiCore implements an agentic reasoning loop where the AI does not simply
 generate answers but performs structured decision-making. The system
 analyzes environment state, generates strategies, critiques its own
 reasoning, and refines the resulting plan before execution.
