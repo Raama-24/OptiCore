@@ -71,7 +71,7 @@ class MainWindow(QMainWindow):
         self.confidence_worker = None
         self.refresh_worker = None
         
-        self.setWindowTitle("Z-Engine: Generates, Engineers and Deploys")
+        self.setWindowTitle("Opticore")
         self.setGeometry(100, 100, 1400, 900)
         self.setup_ui()
         self.setup_menu()
